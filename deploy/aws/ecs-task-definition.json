@@ -1,0 +1,81 @@
+{
+  "family": "penske-logistics-analytics",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/penskeAnalyticsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "penske-api",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/penske-logistics-analytics:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "PYTHONPATH",
+          "value": "/app"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:penske/openai-api-key"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/penske-logistics-analytics",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "api"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8000/ || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    },
+    {
+      "name": "penske-dashboard",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/penske-logistics-analytics:latest",
+      "essential": false,
+      "command": ["streamlit", "run", "app/streamlit_dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"],
+      "portMappings": [
+        {
+          "containerPort": 8501,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "PYTHONPATH",
+          "value": "/app"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:penske/openai-api-key"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/penske-logistics-analytics",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "dashboard"
+        }
+      }
+    }
+  ]
+}

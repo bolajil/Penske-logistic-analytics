@@ -1,0 +1,97 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  dockerRegistryServiceConnection: 'penske-acr'
+  imageRepository: 'penske-logistics-analytics'
+  containerRegistry: 'penskeacr.azurecr.io'
+  dockerfilePath: 'deploy/Dockerfile'
+  tag: '$(Build.BuildId)'
+
+stages:
+- stage: Build
+  displayName: Build and Test
+  jobs:
+  - job: Build
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.11'
+    
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+      displayName: 'Install dependencies'
+    
+    - script: |
+        python -m src.data_generator
+      displayName: 'Generate test data'
+    
+    - script: |
+        pytest tests/ -v --cov=src --cov-report=xml
+      displayName: 'Run tests'
+    
+    - task: PublishCodeCoverageResults@1
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: 'coverage.xml'
+
+- stage: Docker
+  displayName: Build Docker Image
+  dependsOn: Build
+  jobs:
+  - job: BuildImage
+    steps:
+    - task: Docker@2
+      displayName: Build and push
+      inputs:
+        command: buildAndPush
+        repository: $(imageRepository)
+        dockerfile: $(dockerfilePath)
+        containerRegistry: $(dockerRegistryServiceConnection)
+        tags: |
+          $(tag)
+          latest
+
+- stage: DeployDev
+  displayName: Deploy to Dev
+  dependsOn: Docker
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+  jobs:
+  - deployment: DeployDev
+    environment: 'development'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureContainerApps@1
+            inputs:
+              azureSubscription: 'penske-azure'
+              containerAppName: 'penske-analytics-dev'
+              resourceGroup: 'penske-analytics-rg'
+              imageToDeploy: '$(containerRegistry)/$(imageRepository):$(tag)'
+
+- stage: DeployProd
+  displayName: Deploy to Production
+  dependsOn: Docker
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployProd
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureContainerApps@1
+            inputs:
+              azureSubscription: 'penske-azure'
+              containerAppName: 'penske-analytics-prod'
+              resourceGroup: 'penske-analytics-rg'
+              imageToDeploy: '$(containerRegistry)/$(imageRepository):$(tag)'

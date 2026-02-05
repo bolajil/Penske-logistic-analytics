@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.env.local
+*.env
+
+# Data files (real data should not be committed)
+data/real_data/*.csv
+data/real_data/*.parquet
+data/real_data/*.xlsx
+
+# Model artifacts
+models/*.pkl
+models/*.joblib
+models/*.h5
+models/*.keras
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Coverage
+.coverage
+htmlcov/
