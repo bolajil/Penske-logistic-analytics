@@ -985,6 +985,762 @@ az ml online-deployment get-logs --endpoint-name penske-delivery-endpoint --name
 
 ---
 
+## 7. Reusable Templates
+
+> **🔄 This section contains fully reusable code templates that work with ANY dataset.**
+> **Simply update the configuration file and the code adapts automatically.**
+
+### 7.1 Configuration File
+
+```yaml
+# config/azure_config.yaml
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔧 CHANGE THESE VALUES FOR YOUR PROJECT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+azure:
+  subscription_id: "your-subscription-id"    # ← CHANGE: Your Azure subscription
+  resource_group: "my-ml-rg"                 # ← CHANGE: Your resource group name
+  workspace_name: "my-ml-workspace"          # ← CHANGE: Your ML workspace name
+  location: "eastus"                         # ← CHANGE: Your Azure region
+
+data:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 📊 DEFINE YOUR DATA SCHEMA HERE
+  # ═══════════════════════════════════════════════════════════════════════════
+  source_file: "data/your_data.csv"          # ← CHANGE: Path to your data file
+  target_column: "target"                    # ← CHANGE: Column to predict
+  
+  feature_columns:                           # ← CHANGE: Your feature columns
+    - "feature_1"
+    - "feature_2"
+    - "feature_3"
+    - "feature_4"
+  
+  datetime_columns:                          # ← CHANGE: Columns to parse as datetime
+    - "timestamp_column"
+  
+  datetime_features:
+    hour_column: "timestamp_column"
+    dayofweek_column: "timestamp_column"
+
+model:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 🤖 MODEL CONFIGURATION
+  # ═══════════════════════════════════════════════════════════════════════════
+  algorithm: "gradient_boosting"             # Options: gradient_boosting, random_forest, xgboost
+  task: "regression"                         # Options: regression, classification
+  
+  hyperparameters:                           # ← CHANGE: Adjust for your use case
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+
+training:
+  compute_name: "my-training-cluster"        # ← CHANGE: Your compute cluster name
+  vm_size: "Standard_DS3_v2"                 # ← CHANGE: VM size
+  min_instances: 0
+  max_instances: 4
+  test_split: 0.2
+  experiment_name: "my-ml-experiment"        # ← CHANGE: Your experiment name
+
+deployment:
+  endpoint_name: "my-prediction-endpoint"    # ← CHANGE: Your endpoint name
+  deployment_name: "blue"
+  instance_type: "Standard_DS2_v2"           # ← CHANGE: Based on traffic
+  instance_count: 1
+
+openai:
+  resource_name: "my-openai"                 # ← CHANGE: Your OpenAI resource name
+  deployment_name: "gpt-4"                   # ← CHANGE: Your model deployment
+  embedding_deployment: "text-embedding"
+  api_version: "2024-02-15-preview"
+  system_prompt: "You are a helpful assistant."  # ← CHANGE: Your system prompt
+```
+
+### 7.2 Reusable Data Preparation Module
+
+```python
+# src/azure/data_utils.py
+"""
+🔄 REUSABLE DATA PREPARATION FOR AZURE ML
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Works with ANY dataset - just update config.yaml
+"""
+
+import yaml
+import pandas as pd
+from azure.ai.ml import MLClient
+from azure.ai.ml.entities import Data
+from azure.ai.ml.constants import AssetTypes
+from azure.identity import DefaultAzureCredential
+from pathlib import Path
+
+
+def load_config(config_path: str = "config/azure_config.yaml") -> dict:
+    """Load configuration from YAML file."""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def get_ml_client(config: dict) -> MLClient:
+    """
+    Create Azure ML client from configuration.
+    
+    🔧 WHAT CHANGES:
+    - subscription_id, resource_group, workspace_name in config
+    """
+    credential = DefaultAzureCredential()
+    return MLClient(
+        credential=credential,
+        subscription_id=config['azure']['subscription_id'],
+        resource_group_name=config['azure']['resource_group'],
+        workspace_name=config['azure']['workspace_name']
+    )
+
+
+def prepare_features(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """
+    Prepare features based on configuration.
+    
+    🔧 WHAT THIS DOES:
+    - Parses datetime columns
+    - Creates hour and day_of_week features
+    - Works with ANY column names from config
+    """
+    df = df.copy()
+    
+    # Parse datetime columns
+    datetime_cols = config['data'].get('datetime_columns', [])
+    for col in datetime_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col])
+    
+    # Create datetime-derived features
+    dt_features = config['data'].get('datetime_features', {})
+    if 'hour_column' in dt_features:
+        source_col = dt_features['hour_column']
+        if source_col in df.columns:
+            df['hour'] = df[source_col].dt.hour
+    
+    if 'dayofweek_column' in dt_features:
+        source_col = dt_features['dayofweek_column']
+        if source_col in df.columns:
+            df['day_of_week'] = df[source_col].dt.dayofweek
+    
+    return df
+
+
+def register_data(
+    df: pd.DataFrame,
+    config: dict,
+    name: str = None,
+    description: str = None
+) -> Data:
+    """
+    Register dataframe as Azure ML data asset.
+    
+    🔧 USAGE:
+        registered = register_data(df, config, "my-dataset")
+    """
+    ml_client = get_ml_client(config)
+    
+    # Save locally first
+    local_path = f"./data/{name or 'dataset'}.csv"
+    Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(local_path, index=False)
+    
+    # Create data asset
+    data = Data(
+        name=name or f"{config['azure']['workspace_name']}-data",
+        path=local_path,
+        type=AssetTypes.URI_FILE,
+        description=description or "ML training data"
+    )
+    
+    registered = ml_client.data.create_or_update(data)
+    print(f"✅ Registered data: {registered.name} v{registered.version}")
+    return registered
+
+
+def prepare_and_register(config_path: str = "config/azure_config.yaml"):
+    """
+    Main function to prepare and register data.
+    
+    🔧 USAGE:
+        python -m src.azure.data_utils
+    """
+    from sklearn.model_selection import train_test_split
+    
+    config = load_config(config_path)
+    print(f"📋 Workspace: {config['azure']['workspace_name']}")
+    print(f"📊 Target: {config['data']['target_column']}")
+    
+    # Load and prepare data
+    df = pd.read_csv(config['data']['source_file'])
+    print(f"📂 Loaded {len(df)} rows")
+    
+    df = prepare_features(df, config)
+    
+    # Split
+    test_size = config['training'].get('test_split', 0.2)
+    train_df, test_df = train_test_split(df, test_size=test_size, random_state=42)
+    
+    # Register datasets
+    train_data = register_data(train_df, config, "train-data", "Training dataset")
+    test_data = register_data(test_df, config, "test-data", "Test dataset")
+    
+    return train_data, test_data
+
+
+if __name__ == "__main__":
+    prepare_and_register()
+```
+
+### 7.3 Reusable Training Module
+
+```python
+# src/azure/train.py
+"""
+🔄 REUSABLE AZURE ML TRAINING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Works with ANY dataset - just update config.yaml
+"""
+
+from azure.ai.ml import MLClient, command, Input
+from azure.ai.ml.entities import Environment, AmlCompute
+from azure.ai.ml.sweep import Choice, Uniform
+
+from .data_utils import load_config, get_ml_client
+
+
+def ensure_compute(config: dict) -> str:
+    """
+    Create or get compute cluster.
+    
+    🔧 WHAT CHANGES:
+    - compute_name, vm_size, min/max instances in config
+    """
+    ml_client = get_ml_client(config)
+    compute_name = config['training']['compute_name']
+    
+    try:
+        ml_client.compute.get(compute_name)
+        print(f"✅ Found compute: {compute_name}")
+    except:
+        compute = AmlCompute(
+            name=compute_name,
+            type="amlcompute",
+            size=config['training']['vm_size'],
+            min_instances=config['training']['min_instances'],
+            max_instances=config['training']['max_instances']
+        )
+        ml_client.compute.begin_create_or_update(compute).result()
+        print(f"✅ Created compute: {compute_name}")
+    
+    return compute_name
+
+
+def create_training_job(config: dict, data_asset_name: str):
+    """
+    Create training job configuration.
+    
+    🔧 WHAT CHANGES:
+    - Algorithm, hyperparameters from config
+    - Data asset name
+    - Compute cluster
+    """
+    ml_client = get_ml_client(config)
+    
+    # Environment
+    env = Environment(
+        name=f"{config['azure']['workspace_name']}-env",
+        conda_file="./environment.yml",
+        image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04:latest"
+    )
+    
+    # Build command based on config
+    hyperparams = config['model']['hyperparameters']
+    hyperparam_args = " ".join([f"--{k} {v}" for k, v in hyperparams.items()])
+    
+    job = command(
+        code="./src",
+        command=f"python train_script.py --data ${{{{inputs.data}}}} --target {config['data']['target_column']} --task {config['model']['task']} {hyperparam_args} --model-output ${{{{outputs.model}}}}",
+        inputs={
+            "data": Input(type="uri_file", path=f"azureml:{data_asset_name}:1")
+        },
+        outputs={"model": {"type": "uri_folder"}},
+        environment=env,
+        compute=config['training']['compute_name'],
+        experiment_name=config['training']['experiment_name'],
+        display_name=f"{config['model']['algorithm']}-training"
+    )
+    
+    return job
+
+
+def train_model(config_path: str = "config/azure_config.yaml", data_asset: str = "train-data"):
+    """
+    Train model using Azure ML.
+    
+    🔧 USAGE:
+        from src.azure.train import train_model
+        job = train_model("config/azure_config.yaml", "my-training-data")
+    """
+    config = load_config(config_path)
+    ml_client = get_ml_client(config)
+    
+    # Ensure compute exists
+    ensure_compute(config)
+    
+    # Create and submit job
+    job = create_training_job(config, data_asset)
+    
+    print(f"🚀 Submitting training job...")
+    returned_job = ml_client.jobs.create_or_update(job)
+    print(f"✅ Job: {returned_job.name}")
+    print(f"🔗 Studio: {returned_job.studio_url}")
+    
+    # Wait for completion
+    ml_client.jobs.stream(returned_job.name)
+    
+    return returned_job
+
+
+def hyperparameter_sweep(config_path: str = "config/azure_config.yaml", data_asset: str = "train-data"):
+    """
+    Run hyperparameter sweep.
+    
+    🔧 WHAT THIS DOES:
+    - Automatically tunes hyperparameters
+    - Uses Bayesian optimization
+    """
+    config = load_config(config_path)
+    ml_client = get_ml_client(config)
+    
+    ensure_compute(config)
+    job = create_training_job(config, data_asset)
+    
+    # Define sweep
+    sweep_job = job.sweep(
+        sampling_algorithm="bayesian",
+        primary_metric="rmse" if config['model']['task'] == 'regression' else 'accuracy',
+        goal="minimize" if config['model']['task'] == 'regression' else 'maximize'
+    )
+    
+    sweep_job.set_limits(max_total_trials=20, max_concurrent_trials=4)
+    sweep_job.inputs["n_estimators"] = Choice([50, 100, 150, 200])
+    sweep_job.inputs["max_depth"] = Choice([3, 4, 5, 6, 7, 8])
+    sweep_job.inputs["learning_rate"] = Uniform(0.01, 0.3)
+    
+    print(f"🔧 Starting hyperparameter sweep...")
+    returned_sweep = ml_client.jobs.create_or_update(sweep_job)
+    print(f"✅ Sweep: {returned_sweep.name}")
+    
+    return returned_sweep
+```
+
+### 7.4 Reusable Training Script
+
+```python
+# src/train_script.py
+"""
+🔄 GENERIC TRAINING SCRIPT FOR AZURE ML
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Works with ANY dataset via command-line arguments
+"""
+
+import argparse
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.metrics import mean_squared_error, r2_score, accuracy_score, f1_score
+import mlflow
+import joblib
+import os
+
+
+def get_model(algorithm: str, task: str, **hyperparams):
+    """
+    Get model based on algorithm and task type.
+    
+    🔧 SUPPORTS:
+    - gradient_boosting (regression/classification)
+    - random_forest (regression/classification)
+    """
+    models = {
+        ('gradient_boosting', 'regression'): GradientBoostingRegressor,
+        ('gradient_boosting', 'classification'): GradientBoostingClassifier,
+        ('random_forest', 'regression'): RandomForestRegressor,
+        ('random_forest', 'classification'): RandomForestClassifier,
+    }
+    
+    model_class = models.get((algorithm, task))
+    if model_class is None:
+        raise ValueError(f"Unsupported: {algorithm} + {task}")
+    
+    return model_class(**hyperparams, random_state=42)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=str, required=True)
+    parser.add_argument("--target", type=str, required=True)
+    parser.add_argument("--task", type=str, default="regression")
+    parser.add_argument("--algorithm", type=str, default="gradient_boosting")
+    parser.add_argument("--n_estimators", type=int, default=100)
+    parser.add_argument("--max_depth", type=int, default=6)
+    parser.add_argument("--learning_rate", type=float, default=0.1)
+    parser.add_argument("--model-output", type=str, required=True)
+    args = parser.parse_args()
+    
+    mlflow.sklearn.autolog()
+    
+    # Load data
+    print(f"📂 Loading: {args.data}")
+    df = pd.read_csv(args.data)
+    
+    # Separate features and target
+    target_col = args.target
+    feature_cols = [c for c in df.columns if c != target_col]
+    
+    X = df[feature_cols]
+    y = df[target_col]
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    # Train
+    print(f"🚀 Training {args.algorithm} for {args.task}...")
+    model = get_model(
+        args.algorithm,
+        args.task,
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth,
+        learning_rate=args.learning_rate if args.algorithm == 'gradient_boosting' else None
+    )
+    model.fit(X_train, y_train)
+    
+    # Evaluate
+    predictions = model.predict(X_test)
+    
+    if args.task == 'regression':
+        rmse = np.sqrt(mean_squared_error(y_test, predictions))
+        r2 = r2_score(y_test, predictions)
+        print(f"📊 RMSE: {rmse:.4f}, R²: {r2:.4f}")
+        mlflow.log_metrics({"rmse": rmse, "r2": r2})
+    else:
+        acc = accuracy_score(y_test, predictions)
+        f1 = f1_score(y_test, predictions, average='weighted')
+        print(f"📊 Accuracy: {acc:.4f}, F1: {f1:.4f}")
+        mlflow.log_metrics({"accuracy": acc, "f1": f1})
+    
+    # Save
+    os.makedirs(args.model_output, exist_ok=True)
+    joblib.dump(model, os.path.join(args.model_output, "model.pkl"))
+    print(f"✅ Model saved")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### 7.5 Reusable Deployment Module
+
+```python
+# src/azure/deploy.py
+"""
+🔄 REUSABLE AZURE ML DEPLOYMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Works with ANY model - just update config.yaml
+"""
+
+from azure.ai.ml.entities import (
+    Model, ManagedOnlineEndpoint, ManagedOnlineDeployment,
+    CodeConfiguration, Environment
+)
+from azure.ai.ml.constants import AssetTypes
+
+from .data_utils import load_config, get_ml_client
+
+
+def deploy_model(
+    model_path: str,
+    config_path: str = "config/azure_config.yaml"
+):
+    """
+    Deploy model to online endpoint.
+    
+    🔧 USAGE:
+        from src.azure.deploy import deploy_model
+        endpoint = deploy_model("./outputs/model", "config/azure_config.yaml")
+    """
+    config = load_config(config_path)
+    ml_client = get_ml_client(config)
+    
+    # Register model
+    model = Model(
+        path=model_path,
+        name=f"{config['azure']['workspace_name']}-model",
+        type=AssetTypes.CUSTOM_MODEL
+    )
+    registered_model = ml_client.models.create_or_update(model)
+    print(f"✅ Model registered: {registered_model.name}")
+    
+    # Create endpoint
+    endpoint = ManagedOnlineEndpoint(
+        name=config['deployment']['endpoint_name'],
+        auth_mode="key"
+    )
+    ml_client.online_endpoints.begin_create_or_update(endpoint).result()
+    print(f"✅ Endpoint created: {endpoint.name}")
+    
+    # Create deployment
+    env = Environment(
+        name=f"{config['azure']['workspace_name']}-inference-env",
+        conda_file="./environment.yml",
+        image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04:latest"
+    )
+    
+    deployment = ManagedOnlineDeployment(
+        name=config['deployment']['deployment_name'],
+        endpoint_name=config['deployment']['endpoint_name'],
+        model=registered_model,
+        instance_type=config['deployment']['instance_type'],
+        instance_count=config['deployment']['instance_count'],
+        code_configuration=CodeConfiguration(
+            code="./src/azure",
+            scoring_script="score.py"
+        ),
+        environment=env
+    )
+    ml_client.online_deployments.begin_create_or_update(deployment).result()
+    print(f"✅ Deployment created: {deployment.name}")
+    
+    # Set traffic
+    endpoint.traffic = {config['deployment']['deployment_name']: 100}
+    ml_client.online_endpoints.begin_create_or_update(endpoint).result()
+    
+    return endpoint
+
+
+def predict(features: list, config_path: str = "config/azure_config.yaml"):
+    """
+    Make prediction using deployed endpoint.
+    
+    🔧 USAGE:
+        result = predict([1.2, 3.4, 5.6], "config/azure_config.yaml")
+    """
+    import requests
+    
+    config = load_config(config_path)
+    ml_client = get_ml_client(config)
+    
+    endpoint = ml_client.online_endpoints.get(config['deployment']['endpoint_name'])
+    api_key = ml_client.online_endpoints.get_keys(config['deployment']['endpoint_name']).primary_key
+    
+    response = requests.post(
+        endpoint.scoring_uri,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"features": features}
+    )
+    
+    return response.json()
+
+
+def cleanup(config_path: str = "config/azure_config.yaml"):
+    """Clean up Azure resources."""
+    config = load_config(config_path)
+    ml_client = get_ml_client(config)
+    
+    try:
+        ml_client.online_endpoints.begin_delete(config['deployment']['endpoint_name']).result()
+        print(f"✅ Deleted endpoint")
+    except Exception as e:
+        print(f"⚠️ {e}")
+    
+    try:
+        ml_client.compute.begin_delete(config['training']['compute_name']).result()
+        print(f"✅ Deleted compute")
+    except Exception as e:
+        print(f"⚠️ {e}")
+```
+
+### 7.6 Reusable OpenAI Module
+
+```python
+# src/azure/openai_utils.py
+"""
+🔄 REUSABLE AZURE OPENAI UTILITIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Works with ANY use case - just update config.yaml
+"""
+
+import os
+import numpy as np
+from openai import AzureOpenAI
+from typing import List, Dict, Any
+
+from .data_utils import load_config
+
+
+class AzureOpenAIClient:
+    """
+    Reusable Azure OpenAI client.
+    
+    🔧 USAGE:
+        client = AzureOpenAIClient("config/azure_config.yaml")
+        response = client.generate("Hello!")
+        embeddings = client.get_embeddings(["text1", "text2"])
+    """
+    
+    def __init__(self, config_path: str = "config/azure_config.yaml"):
+        self.config = load_config(config_path)
+        openai_config = self.config['openai']
+        
+        self.client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAI_KEY"),
+            api_version=openai_config['api_version'],
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+        )
+        self.deployment = openai_config['deployment_name']
+        self.embedding_deployment = openai_config['embedding_deployment']
+        self.system_prompt = openai_config.get('system_prompt', '')
+    
+    def generate(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+        """Generate text using GPT-4."""
+        messages = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        
+        response = self.client.chat.completions.create(
+            model=self.deployment,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+        return response.choices[0].message.content
+    
+    def get_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Get embeddings for texts."""
+        embeddings = []
+        for text in texts:
+            response = self.client.embeddings.create(
+                model=self.embedding_deployment,
+                input=text
+            )
+            embeddings.append(response.data[0].embedding)
+        return embeddings
+    
+    def semantic_search(self, query: str, documents: List[str], top_k: int = 3) -> List[Dict]:
+        """Search documents by semantic similarity."""
+        query_emb = self.get_embeddings([query])[0]
+        doc_embs = self.get_embeddings(documents)
+        
+        similarities = []
+        for i, doc_emb in enumerate(doc_embs):
+            sim = np.dot(query_emb, doc_emb) / (np.linalg.norm(query_emb) * np.linalg.norm(doc_emb))
+            similarities.append({'document': documents[i], 'score': float(sim), 'index': i})
+        
+        return sorted(similarities, key=lambda x: x['score'], reverse=True)[:top_k]
+
+
+# Convenience functions
+def generate(prompt: str, config_path: str = "config/azure_config.yaml") -> str:
+    return AzureOpenAIClient(config_path).generate(prompt)
+
+def search(query: str, docs: List[str], config_path: str = "config/azure_config.yaml") -> List[Dict]:
+    return AzureOpenAIClient(config_path).semantic_search(query, docs)
+```
+
+### 7.7 Complete Pipeline Example
+
+```python
+# run_azure_pipeline.py
+"""
+🔄 COMPLETE AZURE ML PIPELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Run the entire pipeline with one command!
+
+🔧 USAGE:
+    python run_azure_pipeline.py --config config/azure_config.yaml
+    python run_azure_pipeline.py --config config/azure_config.yaml --sweep
+"""
+
+import argparse
+from src.azure.data_utils import prepare_and_register, load_config
+from src.azure.train import train_model, hyperparameter_sweep
+from src.azure.deploy import deploy_model, predict
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Azure ML Pipeline")
+    parser.add_argument("--config", default="config/azure_config.yaml")
+    parser.add_argument("--sweep", action="store_true", help="Run hyperparameter sweep")
+    parser.add_argument("--skip-train", action="store_true")
+    parser.add_argument("--test", action="store_true")
+    args = parser.parse_args()
+    
+    config = load_config(args.config)
+    print("=" * 60)
+    print(f"🚀 Azure ML Pipeline: {config['azure']['workspace_name']}")
+    print("=" * 60)
+    
+    # Step 1: Prepare data
+    print("\n📊 Step 1: Preparing and registering data...")
+    train_data, test_data = prepare_and_register(args.config)
+    
+    # Step 2: Train
+    if not args.skip_train:
+        if args.sweep:
+            print("\n🔧 Step 2: Running hyperparameter sweep...")
+            hyperparameter_sweep(args.config, train_data.name)
+            return
+        else:
+            print("\n🚀 Step 2: Training model...")
+            job = train_model(args.config, train_data.name)
+    
+    # Step 3: Deploy
+    print("\n🌐 Step 3: Deploying model...")
+    endpoint = deploy_model("./outputs/model", args.config)
+    
+    # Step 4: Test
+    if args.test:
+        print("\n🧪 Step 4: Testing...")
+        result = predict([1.0] * len(config['data']['feature_columns']), args.config)
+        print(f"📦 Prediction: {result}")
+    
+    print("\n" + "=" * 60)
+    print("✅ Pipeline complete!")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### 7.8 What to Change Summary
+
+| Component | What to Change | Where to Change |
+|-----------|----------------|-----------------|
+| **Azure subscription** | `azure.subscription_id` | `config/azure_config.yaml` |
+| **Resource group** | `azure.resource_group` | `config/azure_config.yaml` |
+| **Workspace** | `azure.workspace_name` | `config/azure_config.yaml` |
+| **Data file** | `data.source_file` | `config/azure_config.yaml` |
+| **Target column** | `data.target_column` | `config/azure_config.yaml` |
+| **Feature columns** | `data.feature_columns` | `config/azure_config.yaml` |
+| **Algorithm** | `model.algorithm` | `config/azure_config.yaml` |
+| **Task type** | `model.task` | `config/azure_config.yaml` |
+| **Hyperparameters** | `model.hyperparameters` | `config/azure_config.yaml` |
+| **Compute cluster** | `training.compute_name`, `training.vm_size` | `config/azure_config.yaml` |
+| **Endpoint** | `deployment.endpoint_name` | `config/azure_config.yaml` |
+| **OpenAI model** | `openai.deployment_name` | `config/azure_config.yaml` |
+| **System prompt** | `openai.system_prompt` | `config/azure_config.yaml` |
+
+---
+
 ## Next Steps
 
 1. ✅ **AWS Setup Complete** - See `AWS_IMPLEMENTATION.md`

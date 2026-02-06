@@ -805,6 +805,771 @@ aws sagemaker describe-training-job --training-job-name <job-name>
 
 ---
 
+## 7. Reusable Templates
+
+> **🔄 This section contains fully reusable code templates that work with ANY dataset.**
+> **Simply update the configuration file and the code adapts automatically.**
+
+### 7.1 Configuration File
+
+Create this configuration file to define your project settings:
+
+```yaml
+# config/aws_config.yaml
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔧 CHANGE THESE VALUES FOR YOUR PROJECT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+project:
+  name: "my-ml-project"              # ← CHANGE: Your project name
+  prefix: "my-company"               # ← CHANGE: S3 prefix for your organization
+  region: "us-east-1"                # ← CHANGE: Your AWS region
+
+data:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 📊 DEFINE YOUR DATA SCHEMA HERE
+  # ═══════════════════════════════════════════════════════════════════════════
+  source_file: "data/your_data.csv"  # ← CHANGE: Path to your data file
+  target_column: "target"            # ← CHANGE: Column you want to predict
+  
+  # Feature columns to use for training
+  feature_columns:                   # ← CHANGE: List your feature columns
+    - "feature_1"
+    - "feature_2"
+    - "feature_3"
+    - "feature_4"
+  
+  # Optional: Columns that need datetime parsing
+  datetime_columns:                  # ← CHANGE: Columns to parse as datetime
+    - "timestamp_column"
+  
+  # Optional: Columns to create from datetime
+  datetime_features:                 # ← CHANGE: Features to extract from datetime
+    hour_column: "timestamp_column"  # Creates 'hour' feature
+    dayofweek_column: "timestamp_column"  # Creates 'day_of_week' feature
+
+model:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 🤖 MODEL CONFIGURATION
+  # ═══════════════════════════════════════════════════════════════════════════
+  type: "xgboost"                    # Options: xgboost, linear-learner, sklearn
+  task: "regression"                 # Options: regression, classification
+  
+  hyperparameters:                   # ← CHANGE: Adjust for your use case
+    num_round: 100
+    max_depth: 6
+    eta: 0.3
+    subsample: 0.8
+    objective: "reg:squarederror"    # Use "binary:logistic" for classification
+
+training:
+  instance_type: "ml.m5.xlarge"      # ← CHANGE: Based on data size
+  instance_count: 1
+  test_split: 0.2
+
+deployment:
+  instance_type: "ml.m5.large"       # ← CHANGE: Based on expected traffic
+  initial_instance_count: 1
+  endpoint_name: "my-prediction-endpoint"  # ← CHANGE: Your endpoint name
+
+bedrock:
+  model_id: "anthropic.claude-3-sonnet-20240229-v1:0"
+  max_tokens: 1024
+  system_prompt: "You are a helpful assistant."  # ← CHANGE: Your system prompt
+```
+
+### 7.2 Reusable Data Preparation Module
+
+```python
+# src/aws/data_utils.py
+"""
+🔄 REUSABLE DATA PREPARATION FOR AWS SAGEMAKER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Works with ANY dataset - just update config.yaml
+"""
+
+import yaml
+import pandas as pd
+import boto3
+from sagemaker import Session
+from pathlib import Path
+
+
+def load_config(config_path: str = "config/aws_config.yaml") -> dict:
+    """Load configuration from YAML file."""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def prepare_features(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """
+    Prepare features based on configuration.
+    
+    🔧 WHAT THIS DOES:
+    - Parses datetime columns specified in config
+    - Creates datetime-derived features (hour, day_of_week)
+    - Selects only the columns specified in config
+    """
+    df = df.copy()
+    
+    # Parse datetime columns
+    datetime_cols = config['data'].get('datetime_columns', [])
+    for col in datetime_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col])
+    
+    # Create datetime-derived features
+    dt_features = config['data'].get('datetime_features', {})
+    if 'hour_column' in dt_features:
+        source_col = dt_features['hour_column']
+        if source_col in df.columns:
+            df['hour'] = df[source_col].dt.hour
+    
+    if 'dayofweek_column' in dt_features:
+        source_col = dt_features['dayofweek_column']
+        if source_col in df.columns:
+            df['day_of_week'] = df[source_col].dt.dayofweek
+    
+    return df
+
+
+def upload_to_s3(
+    df: pd.DataFrame,
+    config: dict,
+    dataset_type: str = "train"
+) -> str:
+    """
+    Upload dataframe to S3 in SageMaker-compatible format.
+    
+    🔧 WHAT THIS DOES:
+    - Reorders columns (target first for XGBoost)
+    - Uploads to S3 bucket
+    - Returns S3 path
+    """
+    session = Session()
+    bucket = session.default_bucket()
+    prefix = f"{config['project']['prefix']}/{config['project']['name']}"
+    
+    # Get columns from config
+    target_col = config['data']['target_column']
+    feature_cols = config['data']['feature_columns']
+    
+    # Add datetime-derived features if they exist
+    if 'hour' in df.columns:
+        feature_cols = ['hour'] + [c for c in feature_cols if c != 'hour']
+    if 'day_of_week' in df.columns:
+        feature_cols = ['day_of_week'] + [c for c in feature_cols if c != 'day_of_week']
+    
+    # Reorder: target first (required for XGBoost)
+    columns_order = [target_col] + feature_cols
+    df_ordered = df[columns_order]
+    
+    # Save and upload
+    local_path = f"/tmp/{dataset_type}.csv"
+    df_ordered.to_csv(local_path, index=False, header=False)
+    
+    s3_path = session.upload_data(
+        local_path, 
+        bucket=bucket, 
+        key_prefix=f"{prefix}/{dataset_type}"
+    )
+    
+    print(f"✅ Uploaded {dataset_type} data to: {s3_path}")
+    return s3_path
+
+
+def prepare_and_upload(config_path: str = "config/aws_config.yaml"):
+    """
+    Main function to prepare and upload data.
+    
+    🔧 USAGE:
+        python -m src.aws.data_utils
+        
+    Or in code:
+        from src.aws.data_utils import prepare_and_upload
+        train_path, test_path = prepare_and_upload("config/aws_config.yaml")
+    """
+    from sklearn.model_selection import train_test_split
+    
+    # Load config
+    config = load_config(config_path)
+    print(f"📋 Project: {config['project']['name']}")
+    print(f"📊 Target column: {config['data']['target_column']}")
+    print(f"📊 Feature columns: {config['data']['feature_columns']}")
+    
+    # Load data
+    df = pd.read_csv(config['data']['source_file'])
+    print(f"📂 Loaded {len(df)} rows from {config['data']['source_file']}")
+    
+    # Prepare features
+    df = prepare_features(df, config)
+    
+    # Split data
+    test_size = config['training'].get('test_split', 0.2)
+    train_df, test_df = train_test_split(df, test_size=test_size, random_state=42)
+    print(f"📊 Train: {len(train_df)} rows, Test: {len(test_df)} rows")
+    
+    # Upload to S3
+    train_path = upload_to_s3(train_df, config, "train")
+    test_path = upload_to_s3(test_df, config, "test")
+    
+    return train_path, test_path
+
+
+if __name__ == "__main__":
+    prepare_and_upload()
+```
+
+### 7.3 Reusable Training Module
+
+```python
+# src/aws/train.py
+"""
+🔄 REUSABLE SAGEMAKER TRAINING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Works with ANY dataset - just update config.yaml
+"""
+
+import sagemaker
+from sagemaker import image_uris
+from sagemaker.inputs import TrainingInput
+from sagemaker.tuner import HyperparameterTuner, ContinuousParameter, IntegerParameter
+
+from .data_utils import load_config
+
+
+def get_estimator(config: dict, role: str):
+    """
+    Create SageMaker estimator based on configuration.
+    
+    🔧 WHAT CHANGES:
+    - Model type (xgboost, linear-learner, etc.)
+    - Hyperparameters
+    - Instance type and count
+    """
+    session = sagemaker.Session()
+    bucket = session.default_bucket()
+    prefix = f"{config['project']['prefix']}/{config['project']['name']}"
+    
+    # Get container image
+    container = image_uris.retrieve(
+        framework=config['model']['type'],
+        region=config['project']['region'],
+        version='1.5-1' if config['model']['type'] == 'xgboost' else 'latest'
+    )
+    
+    # Create estimator
+    estimator = sagemaker.estimator.Estimator(
+        image_uri=container,
+        role=role,
+        instance_count=config['training']['instance_count'],
+        instance_type=config['training']['instance_type'],
+        output_path=f's3://{bucket}/{prefix}/output',
+        sagemaker_session=session,
+        hyperparameters=config['model']['hyperparameters']
+    )
+    
+    return estimator
+
+
+def train_model(
+    train_path: str,
+    test_path: str,
+    config_path: str = "config/aws_config.yaml",
+    role: str = None
+):
+    """
+    Train model using SageMaker.
+    
+    🔧 USAGE:
+        from src.aws.train import train_model
+        estimator = train_model(train_path, test_path, "config/aws_config.yaml")
+    """
+    config = load_config(config_path)
+    
+    if role is None:
+        role = sagemaker.get_execution_role()
+    
+    print(f"🚀 Starting training for: {config['project']['name']}")
+    print(f"📦 Model type: {config['model']['type']}")
+    print(f"🎯 Task: {config['model']['task']}")
+    
+    # Create estimator
+    estimator = get_estimator(config, role)
+    
+    # Define inputs
+    train_input = TrainingInput(s3_data=train_path, content_type='text/csv')
+    test_input = TrainingInput(s3_data=test_path, content_type='text/csv')
+    
+    # Train
+    estimator.fit({
+        'train': train_input,
+        'validation': test_input
+    }, wait=True)
+    
+    print(f"✅ Model trained: {estimator.model_data}")
+    return estimator
+
+
+def hyperparameter_tuning(
+    train_path: str,
+    test_path: str,
+    config_path: str = "config/aws_config.yaml",
+    role: str = None,
+    max_jobs: int = 20,
+    max_parallel_jobs: int = 4
+):
+    """
+    Run hyperparameter tuning.
+    
+    🔧 WHAT THIS DOES:
+    - Automatically tunes hyperparameters
+    - Uses Bayesian optimization
+    - Returns best model
+    """
+    config = load_config(config_path)
+    
+    if role is None:
+        role = sagemaker.get_execution_role()
+    
+    estimator = get_estimator(config, role)
+    
+    # Define search space based on model type
+    if config['model']['type'] == 'xgboost':
+        hyperparameter_ranges = {
+            'eta': ContinuousParameter(0.01, 0.3),
+            'max_depth': IntegerParameter(3, 10),
+            'subsample': ContinuousParameter(0.5, 1.0),
+            'num_round': IntegerParameter(50, 200)
+        }
+        objective_metric = 'validation:rmse' if config['model']['task'] == 'regression' else 'validation:error'
+    else:
+        hyperparameter_ranges = {}
+        objective_metric = 'validation:objective_loss'
+    
+    # Create tuner
+    tuner = HyperparameterTuner(
+        estimator=estimator,
+        objective_metric_name=objective_metric,
+        objective_type='Minimize',
+        hyperparameter_ranges=hyperparameter_ranges,
+        max_jobs=max_jobs,
+        max_parallel_jobs=max_parallel_jobs,
+        strategy='Bayesian'
+    )
+    
+    # Define inputs
+    train_input = TrainingInput(s3_data=train_path, content_type='text/csv')
+    test_input = TrainingInput(s3_data=test_path, content_type='text/csv')
+    
+    print(f"🔧 Starting hyperparameter tuning: {max_jobs} jobs")
+    tuner.fit({'train': train_input, 'validation': test_input}, wait=False)
+    
+    print(f"📊 Tuning job: {tuner.latest_tuning_job.name}")
+    return tuner
+
+
+if __name__ == "__main__":
+    from .data_utils import prepare_and_upload
+    train_path, test_path = prepare_and_upload()
+    train_model(train_path, test_path)
+```
+
+### 7.4 Reusable Deployment Module
+
+```python
+# src/aws/deploy.py
+"""
+🔄 REUSABLE SAGEMAKER DEPLOYMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Works with ANY model - just update config.yaml
+"""
+
+from sagemaker.serializers import CSVSerializer
+from sagemaker.deserializers import JSONDeserializer
+
+from .data_utils import load_config
+
+
+def deploy_model(
+    estimator,
+    config_path: str = "config/aws_config.yaml"
+):
+    """
+    Deploy trained model to endpoint.
+    
+    🔧 USAGE:
+        from src.aws.deploy import deploy_model
+        predictor = deploy_model(estimator, "config/aws_config.yaml")
+    """
+    config = load_config(config_path)
+    
+    print(f"🚀 Deploying to endpoint: {config['deployment']['endpoint_name']}")
+    
+    predictor = estimator.deploy(
+        initial_instance_count=config['deployment']['initial_instance_count'],
+        instance_type=config['deployment']['instance_type'],
+        endpoint_name=config['deployment']['endpoint_name'],
+        serializer=CSVSerializer(),
+        deserializer=JSONDeserializer()
+    )
+    
+    print(f"✅ Endpoint created: {predictor.endpoint_name}")
+    return predictor
+
+
+def predict(predictor, features: list):
+    """
+    Make prediction using deployed model.
+    
+    🔧 USAGE:
+        prediction = predict(predictor, [1.2, 3.4, 5.6, 7.8])
+    
+    Args:
+        predictor: SageMaker predictor object
+        features: List of feature values in same order as config
+    """
+    # Convert to CSV format
+    payload = ','.join(map(str, features))
+    result = predictor.predict(payload)
+    return result
+
+
+def batch_predict(
+    input_s3_path: str,
+    output_s3_path: str,
+    estimator,
+    config_path: str = "config/aws_config.yaml"
+):
+    """
+    Run batch predictions on large datasets.
+    
+    🔧 USAGE:
+        batch_predict(
+            "s3://bucket/input/",
+            "s3://bucket/output/",
+            estimator
+        )
+    """
+    config = load_config(config_path)
+    
+    transformer = estimator.transformer(
+        instance_count=1,
+        instance_type=config['deployment']['instance_type'],
+        output_path=output_s3_path
+    )
+    
+    print(f"📊 Starting batch transform...")
+    transformer.transform(
+        data=input_s3_path,
+        content_type='text/csv',
+        split_type='Line'
+    )
+    transformer.wait()
+    
+    print(f"✅ Predictions saved to: {output_s3_path}")
+    return transformer
+
+
+def cleanup(endpoint_name: str = None, config_path: str = "config/aws_config.yaml"):
+    """
+    Clean up AWS resources.
+    
+    🔧 USAGE:
+        cleanup()  # Uses endpoint name from config
+        cleanup("my-custom-endpoint")
+    """
+    import boto3
+    
+    config = load_config(config_path)
+    endpoint = endpoint_name or config['deployment']['endpoint_name']
+    
+    sm = boto3.client('sagemaker')
+    
+    try:
+        sm.delete_endpoint(EndpointName=endpoint)
+        print(f"✅ Deleted endpoint: {endpoint}")
+    except Exception as e:
+        print(f"⚠️ {e}")
+    
+    try:
+        sm.delete_endpoint_config(EndpointConfigName=endpoint)
+        print(f"✅ Deleted endpoint config: {endpoint}")
+    except Exception as e:
+        print(f"⚠️ {e}")
+```
+
+### 7.5 Reusable Bedrock Module
+
+```python
+# src/aws/bedrock_utils.py
+"""
+🔄 REUSABLE BEDROCK UTILITIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Works with ANY use case - just update config.yaml
+"""
+
+import boto3
+import json
+import numpy as np
+from typing import List, Dict, Any
+
+from .data_utils import load_config
+
+
+class BedrockClient:
+    """
+    Reusable Bedrock client for text generation and embeddings.
+    
+    🔧 USAGE:
+        client = BedrockClient("config/aws_config.yaml")
+        response = client.generate("What is machine learning?")
+        embeddings = client.get_embeddings(["text1", "text2"])
+    """
+    
+    def __init__(self, config_path: str = "config/aws_config.yaml"):
+        self.config = load_config(config_path)
+        self.bedrock = boto3.client(
+            'bedrock-runtime',
+            region_name=self.config['project']['region']
+        )
+        self.bedrock_agent = boto3.client(
+            'bedrock-agent-runtime',
+            region_name=self.config['project']['region']
+        )
+    
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str = None,
+        max_tokens: int = None,
+        temperature: float = 0.7
+    ) -> str:
+        """
+        Generate text using Claude.
+        
+        🔧 WHAT CHANGES:
+        - model_id in config
+        - system_prompt in config or parameter
+        - max_tokens in config or parameter
+        """
+        model_id = self.config['bedrock']['model_id']
+        max_tokens = max_tokens or self.config['bedrock']['max_tokens']
+        system_prompt = system_prompt or self.config['bedrock'].get('system_prompt', '')
+        
+        messages = [{"role": "user", "content": prompt}]
+        
+        body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens,
+            "messages": messages,
+            "temperature": temperature
+        }
+        
+        if system_prompt:
+            body["system"] = system_prompt
+        
+        response = self.bedrock.invoke_model(
+            modelId=model_id,
+            body=json.dumps(body),
+            contentType='application/json'
+        )
+        
+        result = json.loads(response['body'].read())
+        return result['content'][0]['text']
+    
+    def get_embeddings(
+        self,
+        texts: List[str],
+        model_id: str = "amazon.titan-embed-text-v1"
+    ) -> List[List[float]]:
+        """
+        Get embeddings for a list of texts.
+        
+        🔧 USAGE:
+            embeddings = client.get_embeddings(["text1", "text2"])
+        """
+        embeddings = []
+        
+        for text in texts:
+            response = self.bedrock.invoke_model(
+                modelId=model_id,
+                body=json.dumps({"inputText": text}),
+                contentType='application/json'
+            )
+            result = json.loads(response['body'].read())
+            embeddings.append(result['embedding'])
+        
+        return embeddings
+    
+    def semantic_search(
+        self,
+        query: str,
+        documents: List[str],
+        top_k: int = 3
+    ) -> List[Dict[str, Any]]:
+        """
+        Search documents by semantic similarity.
+        
+        🔧 USAGE:
+            results = client.semantic_search(
+                "my query",
+                ["doc1", "doc2", "doc3"],
+                top_k=2
+            )
+        """
+        # Get embeddings
+        query_embedding = self.get_embeddings([query])[0]
+        doc_embeddings = self.get_embeddings(documents)
+        
+        # Calculate similarities
+        similarities = []
+        for i, doc_emb in enumerate(doc_embeddings):
+            similarity = np.dot(query_embedding, doc_emb) / (
+                np.linalg.norm(query_embedding) * np.linalg.norm(doc_emb)
+            )
+            similarities.append({
+                'document': documents[i],
+                'score': float(similarity),
+                'index': i
+            })
+        
+        # Sort by similarity
+        similarities.sort(key=lambda x: x['score'], reverse=True)
+        return similarities[:top_k]
+    
+    def query_knowledge_base(
+        self,
+        question: str,
+        knowledge_base_id: str
+    ) -> str:
+        """
+        Query a Bedrock Knowledge Base (RAG).
+        
+        🔧 USAGE:
+            answer = client.query_knowledge_base(
+                "What is the refund policy?",
+                "your-kb-id"
+            )
+        """
+        response = self.bedrock_agent.retrieve_and_generate(
+            input={"text": question},
+            retrieveAndGenerateConfiguration={
+                "type": "KNOWLEDGE_BASE",
+                "knowledgeBaseConfiguration": {
+                    "knowledgeBaseId": knowledge_base_id,
+                    "modelArn": f"arn:aws:bedrock:{self.config['project']['region']}::foundation-model/{self.config['bedrock']['model_id']}"
+                }
+            }
+        )
+        
+        return response["output"]["text"]
+
+
+# Convenience functions
+def generate(prompt: str, config_path: str = "config/aws_config.yaml") -> str:
+    """Quick function for text generation."""
+    client = BedrockClient(config_path)
+    return client.generate(prompt)
+
+
+def search(query: str, documents: List[str], config_path: str = "config/aws_config.yaml") -> List[Dict]:
+    """Quick function for semantic search."""
+    client = BedrockClient(config_path)
+    return client.semantic_search(query, documents)
+```
+
+### 7.6 Complete Pipeline Example
+
+```python
+# run_aws_pipeline.py
+"""
+🔄 COMPLETE AWS ML PIPELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Run the entire pipeline with one command!
+
+🔧 USAGE:
+    python run_aws_pipeline.py --config config/aws_config.yaml
+    python run_aws_pipeline.py --config config/aws_config.yaml --tune
+"""
+
+import argparse
+from src.aws.data_utils import prepare_and_upload, load_config
+from src.aws.train import train_model, hyperparameter_tuning
+from src.aws.deploy import deploy_model, predict
+
+
+def main():
+    parser = argparse.ArgumentParser(description="AWS ML Pipeline")
+    parser.add_argument("--config", default="config/aws_config.yaml", help="Path to config file")
+    parser.add_argument("--tune", action="store_true", help="Run hyperparameter tuning")
+    parser.add_argument("--skip-train", action="store_true", help="Skip training, only deploy")
+    parser.add_argument("--test", action="store_true", help="Test the endpoint after deployment")
+    args = parser.parse_args()
+    
+    config = load_config(args.config)
+    print("=" * 60)
+    print(f"🚀 AWS ML Pipeline: {config['project']['name']}")
+    print("=" * 60)
+    
+    # Step 1: Prepare and upload data
+    print("\n📊 Step 1: Preparing and uploading data...")
+    train_path, test_path = prepare_and_upload(args.config)
+    
+    # Step 2: Train model
+    if not args.skip_train:
+        if args.tune:
+            print("\n🔧 Step 2: Running hyperparameter tuning...")
+            tuner = hyperparameter_tuning(train_path, test_path, args.config)
+            print(f"⏳ Tuning job started. Monitor in SageMaker console.")
+            print(f"   Run 'aws sagemaker describe-hyper-parameter-tuning-job --hyper-parameter-tuning-job-name {tuner.latest_tuning_job.name}'")
+            return
+        else:
+            print("\n🚀 Step 2: Training model...")
+            estimator = train_model(train_path, test_path, args.config)
+    
+    # Step 3: Deploy model
+    print("\n🌐 Step 3: Deploying model...")
+    predictor = deploy_model(estimator, args.config)
+    
+    # Step 4: Test endpoint
+    if args.test:
+        print("\n🧪 Step 4: Testing endpoint...")
+        # Create sample features based on config
+        num_features = len(config['data']['feature_columns'])
+        sample_features = [1.0] * num_features  # Placeholder values
+        result = predict(predictor, sample_features)
+        print(f"📦 Test prediction: {result}")
+    
+    print("\n" + "=" * 60)
+    print("✅ Pipeline complete!")
+    print(f"🌐 Endpoint: {config['deployment']['endpoint_name']}")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### 7.7 What to Change Summary
+
+| Component | What to Change | Where to Change |
+|-----------|----------------|-----------------|
+| **Project name** | `project.name`, `project.prefix` | `config/aws_config.yaml` |
+| **AWS region** | `project.region` | `config/aws_config.yaml` |
+| **Data file** | `data.source_file` | `config/aws_config.yaml` |
+| **Target column** | `data.target_column` | `config/aws_config.yaml` |
+| **Feature columns** | `data.feature_columns` | `config/aws_config.yaml` |
+| **Datetime parsing** | `data.datetime_columns` | `config/aws_config.yaml` |
+| **Model type** | `model.type` | `config/aws_config.yaml` |
+| **Task type** | `model.task` | `config/aws_config.yaml` |
+| **Hyperparameters** | `model.hyperparameters` | `config/aws_config.yaml` |
+| **Instance types** | `training.instance_type`, `deployment.instance_type` | `config/aws_config.yaml` |
+| **LLM model** | `bedrock.model_id` | `config/aws_config.yaml` |
+| **System prompt** | `bedrock.system_prompt` | `config/aws_config.yaml` |
+
+---
+
 ## Next Steps
 
 1. ✅ **AWS Setup Complete** - SageMaker and Bedrock configured
