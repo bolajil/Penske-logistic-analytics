@@ -446,7 +446,6 @@ model = LogisticRegression(
     max_iter=1000
 )
 model.fit(X_train, y_train)
-
 # Get probabilities
 churn_probability = model.predict_proba(X_test)[:, 1]
 
