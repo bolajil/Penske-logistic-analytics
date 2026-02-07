@@ -20,6 +20,9 @@ from src.service_performance import ServicePerformanceAnalyzer
 from src.resource_prediction import DemandForecaster, ResourceOptimizer
 from src.customer_acquisition import LeadScorer, ChurnPredictor, CustomerSegmenter
 from src.genai_insights import InsightGenerator
+from src.cloud_ai_services import (
+    AWSSageMakerService, AzureOpenAIService, VertexAIService, get_demo_response
+)
 
 st.set_page_config(
     page_title="Penske Logistics Analytics",
@@ -79,7 +82,8 @@ def render_sidebar():
     page = st.sidebar.radio(
         "Select View",
         ["📊 Executive Dashboard", "🚛 Fleet Operations", "🏭 Warehouse Analytics",
-         "👥 Customer Intelligence", "📈 Demand Forecasting", "🤖 AI Insights"]
+         "👥 Customer Intelligence", "📈 Demand Forecasting", "🤖 AI Insights",
+         "☁️ Cloud AI/ML"]
     )
     
     st.sidebar.markdown("---")
@@ -428,6 +432,278 @@ def render_ai_insights(datasets, analyzer):
             st.markdown(answer)
 
 
+def render_cloud_ai_services():
+    """Render Cloud AI/ML services UI"""
+    st.title("☁️ Cloud AI/ML Services")
+    st.markdown("Interactive interface for AWS SageMaker/Bedrock, Azure OpenAI/ML, and GCP Vertex AI")
+    
+    # Initialize session state for services
+    if 'aws_service' not in st.session_state:
+        st.session_state.aws_service = AWSSageMakerService()
+    if 'azure_service' not in st.session_state:
+        st.session_state.azure_service = AzureOpenAIService()
+    if 'vertex_service' not in st.session_state:
+        st.session_state.vertex_service = VertexAIService()
+    
+    # Tabs for each cloud provider
+    tab_aws, tab_azure, tab_gcp = st.tabs([
+        "🔶 AWS SageMaker/Bedrock",
+        "🔷 Azure OpenAI/ML", 
+        "🔴 GCP Vertex AI"
+    ])
+    
+    # AWS Tab
+    with tab_aws:
+        st.subheader("AWS SageMaker & Bedrock")
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            st.markdown("### Configuration")
+            aws_region = st.selectbox("Region", [
+                "us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1"
+            ], key="aws_region")
+            aws_access_key = st.text_input("Access Key ID", type="password", key="aws_key")
+            aws_secret_key = st.text_input("Secret Access Key", type="password", key="aws_secret")
+            
+            demo_mode = st.checkbox("Demo Mode (no credentials)", value=True, key="aws_demo")
+            
+            if st.button("Connect to AWS", key="aws_connect"):
+                if demo_mode:
+                    st.success("✅ Connected in Demo Mode")
+                else:
+                    if st.session_state.aws_service.connect(aws_access_key, aws_secret_key):
+                        st.success("✅ Connected to AWS")
+                    else:
+                        st.error("❌ Connection failed")
+            
+            st.markdown("---")
+            st.markdown("### Available Models")
+            st.markdown("""
+            - **Claude 3 Sonnet** - Complex reasoning
+            - **Claude 3 Haiku** - Fast responses
+            - **Titan Text** - Cost-effective
+            - **Titan Embeddings** - Vector search
+            """)
+        
+        with col2:
+            st.markdown("### Bedrock Text Generation")
+            
+            aws_prompt = st.text_area(
+                "Enter your logistics query:",
+                value="Analyze route optimization for Chicago to Nashville delivery with 3 stops.",
+                height=100,
+                key="aws_prompt"
+            )
+            
+            aws_model = st.selectbox("Model", [
+                "anthropic.claude-3-sonnet-20240229-v1:0",
+                "anthropic.claude-3-haiku-20240307-v1:0",
+                "amazon.titan-text-express-v1"
+            ], key="aws_model")
+            
+            if st.button("Generate Response", key="aws_generate"):
+                with st.spinner("Generating..."):
+                    if demo_mode:
+                        response = get_demo_response("route_optimization")
+                    else:
+                        response = st.session_state.aws_service.invoke_bedrock(aws_prompt, aws_model)
+                    st.markdown("### Response")
+                    st.markdown(response)
+            
+            st.markdown("---")
+            st.markdown("### SageMaker Endpoints")
+            
+            if st.button("List Endpoints", key="aws_list"):
+                if demo_mode:
+                    st.info("Demo endpoints:")
+                    demo_endpoints = [
+                        {"EndpointName": "penske-demand-forecast", "EndpointStatus": "InService"},
+                        {"EndpointName": "penske-route-optimizer", "EndpointStatus": "InService"},
+                        {"EndpointName": "penske-etd-predictor", "EndpointStatus": "Updating"}
+                    ]
+                    for ep in demo_endpoints:
+                        status_color = "🟢" if ep["EndpointStatus"] == "InService" else "🟡"
+                        st.markdown(f"{status_color} **{ep['EndpointName']}** - {ep['EndpointStatus']}")
+                else:
+                    endpoints = st.session_state.aws_service.list_endpoints()
+                    if endpoints:
+                        for ep in endpoints:
+                            st.markdown(f"- **{ep['EndpointName']}** - {ep['EndpointStatus']}")
+                    else:
+                        st.info("No endpoints found")
+    
+    # Azure Tab
+    with tab_azure:
+        st.subheader("Azure OpenAI & Machine Learning")
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            st.markdown("### Configuration")
+            azure_endpoint = st.text_input("OpenAI Endpoint", 
+                placeholder="https://your-resource.openai.azure.com/", key="azure_endpoint")
+            azure_key = st.text_input("API Key", type="password", key="azure_key")
+            
+            azure_demo = st.checkbox("Demo Mode (no credentials)", value=True, key="azure_demo")
+            
+            if st.button("Connect to Azure", key="azure_connect"):
+                if azure_demo:
+                    st.success("✅ Connected in Demo Mode")
+                else:
+                    if st.session_state.azure_service.connect(azure_endpoint, azure_key):
+                        st.success("✅ Connected to Azure OpenAI")
+                    else:
+                        st.error("❌ Connection failed")
+            
+            st.markdown("---")
+            st.markdown("### Available Models")
+            st.markdown("""
+            - **GPT-4** - Complex reasoning
+            - **GPT-4 Turbo** - Fast responses  
+            - **GPT-3.5 Turbo** - Cost-effective
+            - **text-embedding-ada-002** - Embeddings
+            """)
+        
+        with col2:
+            st.markdown("### Azure OpenAI Text Generation")
+            
+            azure_prompt = st.text_area(
+                "Enter your logistics query:",
+                value="Forecast demand for next 30 days based on historical patterns.",
+                height=100,
+                key="azure_prompt"
+            )
+            
+            azure_deployment = st.selectbox("Deployment", [
+                "gpt-4", "gpt-4-turbo", "gpt-35-turbo"
+            ], key="azure_deployment")
+            
+            if st.button("Generate Response", key="azure_generate"):
+                with st.spinner("Generating..."):
+                    if azure_demo:
+                        response = get_demo_response("demand_forecast")
+                    else:
+                        response = st.session_state.azure_service.generate_text(azure_prompt, azure_deployment)
+                    st.markdown("### Response")
+                    st.markdown(response)
+            
+            st.markdown("---")
+            st.markdown("### Azure ML Endpoints")
+            
+            if st.button("List ML Endpoints", key="azure_list"):
+                if azure_demo:
+                    st.info("Demo endpoints:")
+                    demo_endpoints = [
+                        {"name": "penske-demand-forecast", "state": "Succeeded"},
+                        {"name": "penske-anomaly-detector", "state": "Succeeded"},
+                        {"name": "penske-cost-predictor", "state": "Updating"}
+                    ]
+                    for ep in demo_endpoints:
+                        status_color = "🟢" if ep["state"] == "Succeeded" else "🟡"
+                        st.markdown(f"{status_color} **{ep['name']}** - {ep['state']}")
+                else:
+                    endpoints = st.session_state.azure_service.list_ml_endpoints()
+                    if endpoints:
+                        for ep in endpoints:
+                            st.markdown(f"- **{ep['name']}** - {ep['state']}")
+                    else:
+                        st.info("No ML endpoints found")
+    
+    # GCP Tab
+    with tab_gcp:
+        st.subheader("GCP Vertex AI")
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            st.markdown("### Configuration")
+            gcp_project = st.text_input("Project ID", 
+                placeholder="your-gcp-project-id", key="gcp_project")
+            gcp_location = st.selectbox("Location", [
+                "us-central1", "us-east1", "europe-west1", "asia-east1"
+            ], key="gcp_location")
+            
+            gcp_demo = st.checkbox("Demo Mode (no credentials)", value=True, key="gcp_demo")
+            
+            if st.button("Connect to GCP", key="gcp_connect"):
+                if gcp_demo:
+                    st.success("✅ Connected in Demo Mode")
+                else:
+                    if st.session_state.vertex_service.connect(gcp_project, gcp_location):
+                        st.success("✅ Connected to Vertex AI")
+                    else:
+                        st.error("❌ Connection failed")
+            
+            st.markdown("---")
+            st.markdown("### Available Models")
+            st.markdown("""
+            - **Gemini 1.5 Pro** - Complex reasoning
+            - **Gemini 1.5 Flash** - Fast responses
+            - **Gemini 1.0 Pro** - Cost-effective
+            - **text-embedding-004** - Embeddings
+            """)
+        
+        with col2:
+            st.markdown("### Vertex AI Text Generation")
+            
+            gcp_prompt = st.text_area(
+                "Enter your logistics query:",
+                value="Analyze fleet performance and provide optimization recommendations.",
+                height=100,
+                key="gcp_prompt"
+            )
+            
+            gcp_model = st.selectbox("Model", [
+                "gemini-1.5-pro", "gemini-1.5-flash", "gemini-1.0-pro"
+            ], key="gcp_model")
+            
+            if st.button("Generate Response", key="gcp_generate"):
+                with st.spinner("Generating..."):
+                    if gcp_demo:
+                        response = get_demo_response("general")
+                    else:
+                        response = st.session_state.vertex_service.generate_text(gcp_prompt)
+                    st.markdown("### Response")
+                    st.markdown(response)
+            
+            st.markdown("---")
+            st.markdown("### Vertex AI Endpoints")
+            
+            if st.button("List Endpoints", key="gcp_list"):
+                if gcp_demo:
+                    st.info("Demo endpoints:")
+                    demo_endpoints = [
+                        {"name": "penske-demand-forecast", "resource_name": "projects/123/endpoints/456"},
+                        {"name": "penske-route-optimizer", "resource_name": "projects/123/endpoints/789"},
+                        {"name": "penske-etd-model", "resource_name": "projects/123/endpoints/012"}
+                    ]
+                    for ep in demo_endpoints:
+                        st.markdown(f"🟢 **{ep['name']}**")
+                        st.caption(ep['resource_name'])
+                else:
+                    endpoints = st.session_state.vertex_service.list_endpoints()
+                    if endpoints:
+                        for ep in endpoints:
+                            st.markdown(f"- **{ep['name']}**")
+                            st.caption(ep['resource_name'])
+                    else:
+                        st.info("No endpoints found")
+    
+    # Bottom section - comparison
+    st.markdown("---")
+    st.subheader("📊 Cloud AI/ML Service Comparison")
+    
+    comparison_data = {
+        "Feature": ["Generative AI", "Custom ML Training", "Managed Endpoints", "Embeddings", "AutoML"],
+        "AWS": ["Bedrock (Claude, Titan)", "SageMaker", "SageMaker Endpoints", "Titan Embeddings", "SageMaker Autopilot"],
+        "Azure": ["Azure OpenAI (GPT-4)", "Azure ML", "Managed Online Endpoints", "Ada-002", "AutoML"],
+        "GCP": ["Vertex AI (Gemini)", "Vertex AI Training", "Vertex AI Endpoints", "text-embedding-004", "Vertex AI AutoML"]
+    }
+    
+    st.table(comparison_data)
+
+
 def main():
     """Main application entry point"""
     datasets = load_data(use_dummy=True)
@@ -451,6 +727,8 @@ def main():
         render_demand_forecasting(datasets)
     elif page == "🤖 AI Insights":
         render_ai_insights(datasets, analyzer)
+    elif page == "☁️ Cloud AI/ML":
+        render_cloud_ai_services()
 
 
 if __name__ == "__main__":
