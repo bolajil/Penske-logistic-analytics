@@ -16,8 +16,10 @@ Complete step-by-step guide for deploying Penske Logistics Analytics to Azure us
 8. [Step 6: Configure Secrets and Environment](#step-6-configure-secrets-and-environment)
 9. [Step 7: Verify Deployment](#step-7-verify-deployment)
 10. [Step 8: Set Up CI/CD](#step-8-set-up-cicd-azure-devops)
-11. [Troubleshooting](#troubleshooting)
-12. [Cost Optimization](#cost-optimization)
+11. [Azure OpenAI Service Integration](#azure-openai-service-integration)
+12. [Azure Machine Learning Integration](#azure-machine-learning-integration)
+13. [Troubleshooting](#troubleshooting)
+14. [Cost Optimization](#cost-optimization)
 
 ---
 
@@ -460,6 +462,462 @@ The `azure-pipelines.yml` is already configured. To use it:
 | Docker | After Build | Push to ACR |
 | DeployDev | `develop` branch | Deploy to dev environment |
 | DeployProd | `main` branch | Deploy to production |
+
+---
+
+## Azure OpenAI Service Integration
+
+Azure OpenAI Service provides access to OpenAI's powerful language models with enterprise security and compliance.
+
+### Create Azure OpenAI Resource
+
+```bash
+# Create Azure OpenAI resource
+az cognitiveservices account create \
+    --name penske-openai \
+    --resource-group $RESOURCE_GROUP \
+    --kind OpenAI \
+    --sku S0 \
+    --location eastus \
+    --custom-domain penske-openai
+
+# Get endpoint and key
+export AZURE_OPENAI_ENDPOINT=$(az cognitiveservices account show \
+    --name penske-openai \
+    --resource-group $RESOURCE_GROUP \
+    --query properties.endpoint \
+    --output tsv)
+
+export AZURE_OPENAI_KEY=$(az cognitiveservices account keys list \
+    --name penske-openai \
+    --resource-group $RESOURCE_GROUP \
+    --query key1 \
+    --output tsv)
+```
+
+### Deploy Models
+
+```bash
+# Deploy GPT-4 model
+az cognitiveservices account deployment create \
+    --name penske-openai \
+    --resource-group $RESOURCE_GROUP \
+    --deployment-name gpt-4 \
+    --model-name gpt-4 \
+    --model-version "0613" \
+    --model-format OpenAI \
+    --sku-capacity 10 \
+    --sku-name Standard
+
+# Deploy text-embedding-ada-002 for embeddings
+az cognitiveservices account deployment create \
+    --name penske-openai \
+    --resource-group $RESOURCE_GROUP \
+    --deployment-name text-embedding \
+    --model-name text-embedding-ada-002 \
+    --model-version "2" \
+    --model-format OpenAI \
+    --sku-capacity 10 \
+    --sku-name Standard
+```
+
+### Available Models for Logistics Analytics
+
+| Model | Use Case | Best For |
+|-------|----------|----------|
+| **GPT-4** | Complex reasoning | Route optimization, demand analysis |
+| **GPT-4 Turbo** | Fast responses | Real-time logistics queries |
+| **GPT-3.5 Turbo** | Cost-effective | High-volume text processing |
+| **text-embedding-ada-002** | Vector search | Semantic search on logistics data |
+
+### Azure OpenAI API Integration
+
+```python
+# src/services/azure_openai_service.py
+from openai import AzureOpenAI
+import os
+
+class AzureOpenAIService:
+    def __init__(self):
+        self.client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAI_KEY"),
+            api_version="2024-02-15-preview",
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+        )
+    
+    def analyze_logistics_data(self, prompt: str, deployment_name: str = "gpt-4"):
+        """Analyze logistics data using Azure OpenAI."""
+        response = self.client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": "You are a logistics analytics expert."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=4096,
+            temperature=0.7
+        )
+        return response.choices[0].message.content
+    
+    def generate_embeddings(self, text: str, deployment_name: str = "text-embedding"):
+        """Generate embeddings for semantic search."""
+        response = self.client.embeddings.create(
+            model=deployment_name,
+            input=text
+        )
+        return response.data[0].embedding
+    
+    def stream_analysis(self, prompt: str, deployment_name: str = "gpt-4"):
+        """Stream logistics analysis for real-time updates."""
+        response = self.client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": "You are a logistics analytics expert."},
+                {"role": "user", "content": prompt}
+            ],
+            stream=True
+        )
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+```
+
+### Azure OpenAI Use Cases for Penske Analytics
+
+```python
+# Example: Route Optimization Analysis
+azure_openai = AzureOpenAIService()
+
+prompt = """
+Analyze this logistics route data and suggest optimizations:
+- Current route: Chicago → Indianapolis → Louisville → Nashville
+- Total distance: 478 miles
+- Average delivery time: 8.5 hours
+- Fuel consumption: 65 gallons
+
+Consider traffic patterns, fuel efficiency, and delivery windows.
+"""
+
+analysis = azure_openai.analyze_logistics_data(prompt)
+print(analysis)
+```
+
+### Store Secrets in Key Vault
+
+```bash
+# Store Azure OpenAI credentials
+az keyvault secret set \
+    --vault-name $KEY_VAULT_NAME \
+    --name "azure-openai-key" \
+    --value "$AZURE_OPENAI_KEY"
+
+az keyvault secret set \
+    --vault-name $KEY_VAULT_NAME \
+    --name "azure-openai-endpoint" \
+    --value "$AZURE_OPENAI_ENDPOINT"
+
+# Update Container App with secrets
+az containerapp secret set \
+    --name penske-api-${ENVIRONMENT} \
+    --resource-group $RESOURCE_GROUP \
+    --secrets "azure-openai-key=keyvaultref:${KEY_VAULT_NAME}/azure-openai-key,identityref:/subscriptions/.../identities/..."
+```
+
+### Azure OpenAI Costs
+
+| Model | Input (per 1K tokens) | Output (per 1K tokens) |
+|-------|----------------------|------------------------|
+| GPT-4 | $0.03 | $0.06 |
+| GPT-4 Turbo | $0.01 | $0.03 |
+| GPT-3.5 Turbo | $0.0005 | $0.0015 |
+| text-embedding-ada-002 | $0.0001 | - |
+
+---
+
+## Azure Machine Learning Integration
+
+Azure Machine Learning (Azure ML) enables training, deploying, and managing custom ML models for logistics predictions.
+
+### Azure ML Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Azure ML Pipeline                                │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌────────────┐ │
+│  │  Blob Data  │→ │  Compute    │→ │   Model     │→ │  Managed   │ │
+│  │  (input)    │  │  Cluster    │  │  Registry   │  │  Endpoint  │ │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Step 1: Create Azure ML Workspace
+
+```bash
+# Install ML extension
+az extension add --name ml
+
+# Create ML workspace
+az ml workspace create \
+    --name penske-ml-workspace \
+    --resource-group $RESOURCE_GROUP \
+    --location $LOCATION
+
+# Get workspace details
+az ml workspace show \
+    --name penske-ml-workspace \
+    --resource-group $RESOURCE_GROUP
+```
+
+### Step 2: Create Compute Cluster
+
+```bash
+# Create compute cluster for training
+az ml compute create \
+    --name penske-cluster \
+    --type AmlCompute \
+    --size Standard_DS3_v2 \
+    --min-instances 0 \
+    --max-instances 4 \
+    --workspace-name penske-ml-workspace \
+    --resource-group $RESOURCE_GROUP
+```
+
+### Step 3: Create Training Data
+
+```bash
+# Create data asset
+az ml data create \
+    --name penske-training-data \
+    --version 1 \
+    --path azureml://datastores/workspaceblobstore/paths/training/ \
+    --type uri_folder \
+    --workspace-name penske-ml-workspace \
+    --resource-group $RESOURCE_GROUP
+```
+
+### Step 4: Train Custom Model
+
+```python
+# src/ml/azure_ml_training.py
+from azure.ai.ml import MLClient, command, Input
+from azure.ai.ml.entities import Environment, AmlCompute
+from azure.identity import DefaultAzureCredential
+
+def train_demand_forecasting_model():
+    """Train demand forecasting model on Azure ML."""
+    
+    # Connect to workspace
+    ml_client = MLClient(
+        DefaultAzureCredential(),
+        subscription_id="your-subscription-id",
+        resource_group_name="penske-analytics-rg",
+        workspace_name="penske-ml-workspace"
+    )
+    
+    # Define training job
+    job = command(
+        code="./src/ml/scripts",
+        command="python train.py --data ${{inputs.training_data}} --n_estimators 100 --max_depth 10",
+        inputs={
+            "training_data": Input(
+                type="uri_folder",
+                path="azureml://datastores/workspaceblobstore/paths/training/"
+            )
+        },
+        environment="AzureML-sklearn-1.0-ubuntu20.04-py38-cpu@latest",
+        compute="penske-cluster",
+        display_name="penske-demand-forecast-training",
+        experiment_name="penske-logistics"
+    )
+    
+    # Submit job
+    returned_job = ml_client.jobs.create_or_update(job)
+    ml_client.jobs.stream(returned_job.name)
+    
+    return returned_job
+
+# Training script: src/ml/scripts/train.py
+"""
+import argparse
+import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
+import joblib
+import mlflow
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data', type=str)
+    parser.add_argument('--n_estimators', type=int, default=100)
+    parser.add_argument('--max_depth', type=int, default=10)
+    args = parser.parse_args()
+    
+    # Enable MLflow autologging
+    mlflow.sklearn.autolog()
+    
+    # Load data
+    train_data = pd.read_csv(f'{args.data}/train.csv')
+    
+    # Train model
+    model = RandomForestRegressor(
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth
+    )
+    model.fit(train_data.drop('target', axis=1), train_data['target'])
+    
+    # Save model
+    joblib.dump(model, 'outputs/model.joblib')
+"""
+```
+
+### Step 5: Deploy Model Endpoint
+
+```python
+# Deploy to managed online endpoint
+from azure.ai.ml.entities import (
+    ManagedOnlineEndpoint,
+    ManagedOnlineDeployment,
+    Model,
+    Environment,
+    CodeConfiguration
+)
+
+def deploy_model(ml_client, model_path):
+    """Deploy trained model to Azure ML managed endpoint."""
+    
+    # Create endpoint
+    endpoint = ManagedOnlineEndpoint(
+        name="penske-demand-forecast",
+        description="Penske demand forecasting endpoint",
+        auth_mode="key"
+    )
+    ml_client.online_endpoints.begin_create_or_update(endpoint).result()
+    
+    # Register model
+    model = Model(
+        path=model_path,
+        name="penske-demand-model",
+        description="Demand forecasting model"
+    )
+    ml_client.models.create_or_update(model)
+    
+    # Create deployment
+    deployment = ManagedOnlineDeployment(
+        name="blue",
+        endpoint_name="penske-demand-forecast",
+        model=model,
+        instance_type="Standard_DS2_v2",
+        instance_count=1
+    )
+    ml_client.online_deployments.begin_create_or_update(deployment).result()
+    
+    # Set traffic
+    endpoint.traffic = {"blue": 100}
+    ml_client.online_endpoints.begin_create_or_update(endpoint).result()
+    
+    return endpoint
+```
+
+### Step 6: Invoke Endpoint
+
+```python
+# src/services/azure_ml_service.py
+from azure.ai.ml import MLClient
+from azure.identity import DefaultAzureCredential
+import json
+
+class AzureMLService:
+    def __init__(self, endpoint_name='penske-demand-forecast'):
+        self.ml_client = MLClient(
+            DefaultAzureCredential(),
+            subscription_id="your-subscription-id",
+            resource_group_name="penske-analytics-rg",
+            workspace_name="penske-ml-workspace"
+        )
+        self.endpoint_name = endpoint_name
+    
+    def predict_demand(self, features: list):
+        """Predict logistics demand using deployed model."""
+        response = self.ml_client.online_endpoints.invoke(
+            endpoint_name=self.endpoint_name,
+            request_file=None,
+            deployment_name="blue",
+            request=json.dumps({"data": features})
+        )
+        return json.loads(response)
+    
+    def batch_predict(self, data_path: str, output_path: str):
+        """Run batch predictions using batch endpoint."""
+        from azure.ai.ml.entities import BatchEndpoint, BatchDeployment
+        
+        job = self.ml_client.batch_endpoints.invoke(
+            endpoint_name="penske-batch-endpoint",
+            input=Input(path=data_path)
+        )
+        return job
+```
+
+### Azure ML Use Cases for Penske Analytics
+
+| Use Case | Model Type | Description |
+|----------|------------|-------------|
+| **Demand Forecasting** | Time Series | Predict shipment volumes |
+| **Route Optimization** | Reinforcement Learning | Optimize delivery routes |
+| **ETD Prediction** | Regression | Estimate delivery times |
+| **Anomaly Detection** | Unsupervised | Detect logistics anomalies |
+| **Cost Prediction** | Regression | Forecast shipping costs |
+
+### Azure ML Costs
+
+| Resource | Use Case | Cost/Hour |
+|----------|----------|-----------|
+| Standard_DS2_v2 | Dev/Test endpoints | $0.146 |
+| Standard_DS3_v2 | Training | $0.293 |
+| Standard_DS4_v2 | Production endpoint | $0.585 |
+| Standard_NC6 | GPU Training | $0.90 |
+
+### Auto-Scaling Endpoint
+
+```bash
+# Configure auto-scaling for production
+az ml online-deployment update \
+    --name blue \
+    --endpoint-name penske-demand-forecast \
+    --workspace-name penske-ml-workspace \
+    --resource-group $RESOURCE_GROUP \
+    --instance-count 2
+
+# Enable autoscale
+az monitor autoscale create \
+    --resource-group $RESOURCE_GROUP \
+    --name penske-autoscale \
+    --min-count 1 \
+    --max-count 5 \
+    --count 2 \
+    --resource /subscriptions/.../endpoints/penske-demand-forecast
+```
+
+### Cleanup Azure ML Resources
+
+```bash
+# Delete endpoint
+az ml online-endpoint delete \
+    --name penske-demand-forecast \
+    --workspace-name penske-ml-workspace \
+    --resource-group $RESOURCE_GROUP \
+    --yes
+
+# Delete compute cluster
+az ml compute delete \
+    --name penske-cluster \
+    --workspace-name penske-ml-workspace \
+    --resource-group $RESOURCE_GROUP \
+    --yes
+
+# Delete workspace (optional)
+az ml workspace delete \
+    --name penske-ml-workspace \
+    --resource-group $RESOURCE_GROUP \
+    --yes
+```
 
 ---
 

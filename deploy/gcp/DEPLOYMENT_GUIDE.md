@@ -16,8 +16,10 @@ Complete step-by-step guide for deploying Penske Logistics Analytics to Google C
 8. [Step 6: Set Up Load Balancer](#step-6-set-up-load-balancer-optional)
 9. [Step 7: Verify Deployment](#step-7-verify-deployment)
 10. [Step 8: Set Up CI/CD](#step-8-set-up-cicd-cloud-build)
-11. [Troubleshooting](#troubleshooting)
-12. [Cost Optimization](#cost-optimization)
+11. [Vertex AI Generative AI Integration](#vertex-ai-generative-ai-integration)
+12. [Vertex AI ML Platform Integration](#vertex-ai-ml-platform-integration)
+13. [Troubleshooting](#troubleshooting)
+14. [Cost Optimization](#cost-optimization)
 
 ---
 
@@ -533,6 +535,508 @@ gcloud builds triggers create github \
     --branch-pattern="^main$" \
     --build-config="deploy/gcp/cloudbuild.yaml" \
     --name="penske-prod-deploy"
+```
+
+---
+
+## Vertex AI Generative AI Integration
+
+Vertex AI provides access to Google's foundation models (Gemini, PaLM) for generative AI capabilities in your logistics analytics application.
+
+### Enable Vertex AI APIs
+
+```bash
+# Enable required APIs
+gcloud services enable \
+    aiplatform.googleapis.com \
+    generativelanguage.googleapis.com \
+    --project=$PROJECT_ID
+
+# Verify APIs are enabled
+gcloud services list --enabled | grep -E "(aiplatform|generativelanguage)"
+```
+
+### Available Models for Logistics Analytics
+
+| Model | Use Case | Best For |
+|-------|----------|----------|
+| **Gemini 1.5 Pro** | Complex reasoning | Route optimization, demand analysis |
+| **Gemini 1.5 Flash** | Fast responses | Real-time logistics queries |
+| **Gemini 1.0 Pro** | Cost-effective | General text processing |
+| **text-embedding-004** | Vector search | Semantic search on logistics data |
+| **code-bison** | Code generation | Automation scripts |
+
+### Vertex AI Generative AI Integration
+
+```python
+# src/services/vertex_ai_service.py
+import vertexai
+from vertexai.generative_models import GenerativeModel, Part
+from vertexai.language_models import TextEmbeddingModel
+import os
+
+class VertexAIService:
+    def __init__(self, project_id: str, location: str = "us-central1"):
+        vertexai.init(project=project_id, location=location)
+        self.model = GenerativeModel("gemini-1.5-pro")
+        self.embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-004")
+    
+    def analyze_logistics_data(self, prompt: str):
+        """Analyze logistics data using Vertex AI Gemini."""
+        system_instruction = "You are a logistics analytics expert specializing in route optimization and demand forecasting."
+        
+        response = self.model.generate_content(
+            prompt,
+            generation_config={
+                "max_output_tokens": 4096,
+                "temperature": 0.7,
+                "top_p": 0.95,
+            }
+        )
+        return response.text
+    
+    def generate_embeddings(self, texts: list):
+        """Generate embeddings for semantic search."""
+        embeddings = self.embedding_model.get_embeddings(texts)
+        return [embedding.values for embedding in embeddings]
+    
+    def stream_analysis(self, prompt: str):
+        """Stream logistics analysis for real-time updates."""
+        responses = self.model.generate_content(
+            prompt,
+            stream=True,
+            generation_config={
+                "max_output_tokens": 4096,
+                "temperature": 0.7,
+            }
+        )
+        for response in responses:
+            yield response.text
+    
+    def analyze_with_context(self, prompt: str, context_docs: list):
+        """Analyze with RAG context from logistics documents."""
+        context = "\n\n".join([f"Document {i+1}:\n{doc}" for i, doc in enumerate(context_docs)])
+        
+        full_prompt = f"""Based on the following logistics documents:
+
+{context}
+
+Answer this question: {prompt}"""
+        
+        return self.analyze_logistics_data(full_prompt)
+```
+
+### Vertex AI Use Cases for Penske Analytics
+
+```python
+# Example: Route Optimization Analysis
+vertex_ai = VertexAIService(project_id="penske-analytics-prod")
+
+prompt = """
+Analyze this logistics route data and suggest optimizations:
+- Current route: Chicago → Indianapolis → Louisville → Nashville
+- Total distance: 478 miles
+- Average delivery time: 8.5 hours
+- Fuel consumption: 65 gallons
+
+Consider traffic patterns, fuel efficiency, and delivery windows.
+"""
+
+analysis = vertex_ai.analyze_logistics_data(prompt)
+print(analysis)
+
+# Example: Generate embeddings for semantic search
+documents = [
+    "Shipment delayed due to weather conditions in Chicago",
+    "Route optimization reduced fuel consumption by 15%",
+    "Peak demand expected during holiday season"
+]
+embeddings = vertex_ai.generate_embeddings(documents)
+```
+
+### Store Credentials in Secret Manager
+
+```bash
+# Service account is used automatically via Application Default Credentials
+# For additional API keys, store in Secret Manager
+
+gcloud secrets create vertex-ai-config \
+    --data-file=- <<EOF
+{
+    "project_id": "$PROJECT_ID",
+    "location": "us-central1",
+    "model": "gemini-1.5-pro"
+}
+EOF
+
+# Grant Cloud Run access
+gcloud secrets add-iam-policy-binding vertex-ai-config \
+    --member="serviceAccount:$SERVICE_ACCOUNT" \
+    --role="roles/secretmanager.secretAccessor"
+```
+
+### IAM Permissions for Vertex AI
+
+```bash
+# Grant Vertex AI permissions to service account
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SERVICE_ACCOUNT" \
+    --role="roles/aiplatform.user"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SERVICE_ACCOUNT" \
+    --role="roles/ml.developer"
+```
+
+### Vertex AI Generative AI Costs
+
+| Model | Input (per 1K chars) | Output (per 1K chars) |
+|-------|---------------------|----------------------|
+| Gemini 1.5 Pro | $0.00125 | $0.00375 |
+| Gemini 1.5 Flash | $0.000125 | $0.000375 |
+| Gemini 1.0 Pro | $0.000125 | $0.000375 |
+| text-embedding-004 | $0.000025 | - |
+
+---
+
+## Vertex AI ML Platform Integration
+
+Vertex AI ML Platform enables training, deploying, and managing custom ML models for logistics predictions.
+
+### Vertex AI ML Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Vertex AI ML Pipeline                           │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌────────────┐ │
+│  │  GCS Data   │→ │  Training   │→ │   Model     │→ │  Endpoint  │ │
+│  │  (input)    │  │   Job       │  │  Registry   │  │ (inference)│ │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Step 1: Create GCS Bucket for Training Data
+
+```bash
+# Create GCS bucket for ML data
+gsutil mb -l $REGION gs://penske-vertex-${PROJECT_ID}
+
+# Upload training data
+gsutil cp -r data/training/ gs://penske-vertex-${PROJECT_ID}/training/
+```
+
+### Step 2: Create Custom Training Job
+
+```python
+# src/ml/vertex_training.py
+from google.cloud import aiplatform
+
+def train_demand_forecasting_model():
+    """Train demand forecasting model on Vertex AI."""
+    
+    aiplatform.init(project="penske-analytics-prod", location="us-central1")
+    
+    # Create custom training job
+    job = aiplatform.CustomTrainingJob(
+        display_name="penske-demand-forecast-training",
+        script_path="src/ml/scripts/train.py",
+        container_uri="us-docker.pkg.dev/vertex-ai/training/sklearn-cpu.1-0:latest",
+        requirements=["pandas", "scikit-learn", "joblib"],
+        model_serving_container_image_uri="us-docker.pkg.dev/vertex-ai/prediction/sklearn-cpu.1-0:latest"
+    )
+    
+    # Run training
+    model = job.run(
+        dataset=None,
+        model_display_name="penske-demand-model",
+        args=[
+            "--data-path", "gs://penske-vertex-PROJECT_ID/training/",
+            "--n-estimators", "100",
+            "--max-depth", "10"
+        ],
+        replica_count=1,
+        machine_type="n1-standard-4",
+        accelerator_type=None,
+        accelerator_count=0,
+    )
+    
+    return model
+
+# Training script: src/ml/scripts/train.py
+"""
+import argparse
+import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
+import joblib
+from google.cloud import storage
+import os
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data-path', type=str)
+    parser.add_argument('--n-estimators', type=int, default=100)
+    parser.add_argument('--max-depth', type=int, default=10)
+    args = parser.parse_args()
+    
+    # Download data from GCS
+    storage_client = storage.Client()
+    bucket_name = args.data_path.replace('gs://', '').split('/')[0]
+    blob_path = '/'.join(args.data_path.replace('gs://', '').split('/')[1:])
+    
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(f'{blob_path}train.csv')
+    blob.download_to_filename('/tmp/train.csv')
+    
+    # Load and train
+    train_data = pd.read_csv('/tmp/train.csv')
+    model = RandomForestRegressor(
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth
+    )
+    model.fit(train_data.drop('target', axis=1), train_data['target'])
+    
+    # Save model to AIP_MODEL_DIR
+    model_dir = os.environ.get('AIP_MODEL_DIR', '/tmp/model')
+    os.makedirs(model_dir, exist_ok=True)
+    joblib.dump(model, f'{model_dir}/model.joblib')
+"""
+```
+
+### Step 3: Deploy Model Endpoint
+
+```python
+# Deploy to Vertex AI endpoint
+from google.cloud import aiplatform
+
+def deploy_model(model):
+    """Deploy trained model to Vertex AI endpoint."""
+    
+    aiplatform.init(project="penske-analytics-prod", location="us-central1")
+    
+    # Create endpoint
+    endpoint = aiplatform.Endpoint.create(
+        display_name="penske-demand-forecast",
+        description="Penske demand forecasting endpoint"
+    )
+    
+    # Deploy model to endpoint
+    model.deploy(
+        endpoint=endpoint,
+        deployed_model_display_name="penske-demand-v1",
+        machine_type="n1-standard-2",
+        min_replica_count=1,
+        max_replica_count=5,
+        traffic_percentage=100,
+        sync=True
+    )
+    
+    return endpoint
+
+# Alternative: Deploy existing model
+def deploy_existing_model(model_id):
+    """Deploy an existing model from Model Registry."""
+    
+    model = aiplatform.Model(model_id)
+    
+    endpoint = model.deploy(
+        machine_type="n1-standard-2",
+        min_replica_count=1,
+        max_replica_count=5,
+        accelerator_type=None,
+        accelerator_count=0,
+    )
+    
+    return endpoint
+```
+
+### Step 4: Invoke Endpoint
+
+```python
+# src/services/vertex_ml_service.py
+from google.cloud import aiplatform
+import json
+
+class VertexMLService:
+    def __init__(self, endpoint_name: str, project: str, location: str = "us-central1"):
+        aiplatform.init(project=project, location=location)
+        self.endpoint = aiplatform.Endpoint(endpoint_name)
+    
+    def predict_demand(self, features: list):
+        """Predict logistics demand using deployed model."""
+        response = self.endpoint.predict(instances=features)
+        return response.predictions
+    
+    def batch_predict(self, gcs_source: str, gcs_destination: str):
+        """Run batch predictions for large datasets."""
+        model = aiplatform.Model("projects/.../models/penske-demand-model")
+        
+        batch_prediction_job = model.batch_predict(
+            job_display_name="penske-batch-prediction",
+            gcs_source=gcs_source,
+            gcs_destination_prefix=gcs_destination,
+            machine_type="n1-standard-4",
+            starting_replica_count=1,
+            max_replica_count=5,
+        )
+        
+        batch_prediction_job.wait()
+        return batch_prediction_job
+
+# Example usage
+vertex_ml = VertexMLService(
+    endpoint_name="projects/123/locations/us-central1/endpoints/456",
+    project="penske-analytics-prod"
+)
+
+# Single prediction
+features = [[100, 5, 3, 0.8, 25]]  # Example features
+predictions = vertex_ml.predict_demand(features)
+print(f"Predicted demand: {predictions}")
+```
+
+### AutoML for Quick Model Training
+
+```python
+# Use AutoML for quick model training without custom code
+from google.cloud import aiplatform
+
+def train_automl_model():
+    """Train model using Vertex AI AutoML."""
+    
+    aiplatform.init(project="penske-analytics-prod", location="us-central1")
+    
+    # Create dataset
+    dataset = aiplatform.TabularDataset.create(
+        display_name="penske-demand-dataset",
+        gcs_source="gs://penske-vertex-PROJECT_ID/training/train.csv"
+    )
+    
+    # Train AutoML model
+    job = aiplatform.AutoMLTabularTrainingJob(
+        display_name="penske-automl-demand",
+        optimization_prediction_type="regression",
+        optimization_objective="minimize-rmse"
+    )
+    
+    model = job.run(
+        dataset=dataset,
+        target_column="target",
+        training_fraction_split=0.8,
+        validation_fraction_split=0.1,
+        test_fraction_split=0.1,
+        model_display_name="penske-automl-model",
+        budget_milli_node_hours=1000,  # 1 node hour
+    )
+    
+    return model
+```
+
+### Vertex AI ML Use Cases for Penske Analytics
+
+| Use Case | Model Type | Description |
+|----------|------------|-------------|
+| **Demand Forecasting** | Time Series / AutoML | Predict shipment volumes |
+| **Route Optimization** | Custom Training | Optimize delivery routes |
+| **ETD Prediction** | AutoML Regression | Estimate delivery times |
+| **Anomaly Detection** | Custom Training | Detect logistics anomalies |
+| **Cost Prediction** | AutoML Regression | Forecast shipping costs |
+
+### Vertex AI ML Costs
+
+| Resource | Use Case | Cost/Hour |
+|----------|----------|-----------|
+| n1-standard-2 | Dev/Test endpoints | $0.095 |
+| n1-standard-4 | Training | $0.19 |
+| n1-standard-8 | Production endpoint | $0.38 |
+| n1-highmem-4 | Memory-intensive | $0.24 |
+| AutoML Training | Per node hour | $19.32 |
+
+### Auto-Scaling Endpoint
+
+```bash
+# Configure auto-scaling for production
+gcloud ai endpoints deploy-model ENDPOINT_ID \
+    --project=$PROJECT_ID \
+    --region=$REGION \
+    --model=MODEL_ID \
+    --display-name="penske-demand-v1" \
+    --machine-type=n1-standard-2 \
+    --min-replica-count=1 \
+    --max-replica-count=10 \
+    --traffic-split=0=100
+```
+
+### Vertex AI Pipelines for MLOps
+
+```python
+# Create ML pipeline for automated retraining
+from kfp import dsl
+from kfp.v2 import compiler
+from google.cloud import aiplatform
+
+@dsl.pipeline(name="penske-ml-pipeline")
+def ml_pipeline(
+    project: str,
+    location: str,
+    training_data: str
+):
+    # Data preprocessing
+    preprocess_op = dsl.ContainerOp(
+        name="preprocess",
+        image="gcr.io/PROJECT_ID/preprocess:latest",
+        arguments=["--input", training_data]
+    )
+    
+    # Training
+    train_op = dsl.ContainerOp(
+        name="train",
+        image="gcr.io/PROJECT_ID/train:latest",
+        arguments=["--data", preprocess_op.output]
+    )
+    
+    # Deploy
+    deploy_op = dsl.ContainerOp(
+        name="deploy",
+        image="gcr.io/PROJECT_ID/deploy:latest",
+        arguments=["--model", train_op.output]
+    )
+
+# Compile and run
+compiler.Compiler().compile(ml_pipeline, "pipeline.json")
+
+aiplatform.PipelineJob(
+    display_name="penske-ml-pipeline",
+    template_path="pipeline.json",
+    parameter_values={
+        "project": "penske-analytics-prod",
+        "location": "us-central1",
+        "training_data": "gs://penske-vertex-PROJECT_ID/training/"
+    }
+).run()
+```
+
+### Cleanup Vertex AI Resources
+
+```bash
+# Delete endpoint
+gcloud ai endpoints delete ENDPOINT_ID \
+    --project=$PROJECT_ID \
+    --region=$REGION \
+    --quiet
+
+# Delete model
+gcloud ai models delete MODEL_ID \
+    --project=$PROJECT_ID \
+    --region=$REGION \
+    --quiet
+
+# Delete training jobs
+gcloud ai custom-jobs cancel JOB_ID \
+    --project=$PROJECT_ID \
+    --region=$REGION
+
+# Delete GCS data (optional)
+gsutil rm -r gs://penske-vertex-${PROJECT_ID}
 ```
 
 ---
