@@ -34,6 +34,8 @@ npm run dev
 ```
 **URL:** http://localhost:3000
 
+> **Note:** The React lint errors will resolve after running `npm install` in the react-frontend directory.
+
 ---
 
 ## Directory Structure
