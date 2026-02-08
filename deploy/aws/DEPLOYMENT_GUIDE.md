@@ -1360,6 +1360,21 @@ Predicted demand for tomorrow: 1320 shipments
 | 6. Deploy Endpoint | Host model for predictions | SageMaker endpoint |
 | 7. Make Predictions | Call endpoint API | Real-time results |
 
+### AWS Console URLs - View Your Results
+
+After each step, you can view your resources in the AWS Console:
+
+| Resource | Console URL |
+|----------|-------------|
+| **Training Data (S3)** | https://console.aws.amazon.com/s3/buckets/penske-sagemaker-{ACCOUNT_ID}/?prefix=training/ |
+| **Training Jobs** | https://console.aws.amazon.com/sagemaker/home?#/jobs |
+| **Model Artifacts (S3)** | https://console.aws.amazon.com/s3/buckets/penske-sagemaker-{ACCOUNT_ID}/?prefix=output/ |
+| **Registered Models** | https://console.aws.amazon.com/sagemaker/home?#/models |
+| **Endpoints** | https://console.aws.amazon.com/sagemaker/home?#/endpoints |
+| **CloudWatch Logs** | https://console.aws.amazon.com/cloudwatch/home?#logsV2:log-groups/log-group/$252Faws$252Fsagemaker$252FTrainingJobs |
+
+> **Tip:** Replace `{ACCOUNT_ID}` with your AWS account ID. Find it by running: `aws sts get-caller-identity --query Account --output text`
+
 ### SageMaker Costs
 
 | Resource | Use Case | Cost |

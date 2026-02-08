@@ -1469,6 +1469,21 @@ Predicted demand for tomorrow: 1320 shipments
 | 6. Deploy Model | Create endpoint | Vertex AI Endpoints |
 | 7. Predictions | Call endpoint API | Real-time results |
 
+### GCP Console URLs - View Your Results
+
+After each step, you can view your resources in the Google Cloud Console:
+
+| Resource | Console URL |
+|----------|-------------|
+| **Training Data (GCS)** | https://console.cloud.google.com/storage/browser/penske-vertex-{PROJECT_ID}/training |
+| **Training Jobs** | https://console.cloud.google.com/vertex-ai/training/custom-jobs?project={PROJECT_ID} |
+| **Model Registry** | https://console.cloud.google.com/vertex-ai/models?project={PROJECT_ID} |
+| **Endpoints** | https://console.cloud.google.com/vertex-ai/endpoints?project={PROJECT_ID} |
+| **Logs (Training)** | https://console.cloud.google.com/logs/query?project={PROJECT_ID}&query=resource.type%3D%22ml_job%22 |
+| **Vertex AI Dashboard** | https://console.cloud.google.com/vertex-ai?project={PROJECT_ID} |
+
+> **Tip:** Replace `{PROJECT_ID}` with your GCP project ID. Find it by running: `gcloud config get-value project`
+
 ### Vertex AI ML Costs
 
 | Resource | Use Case | Cost |

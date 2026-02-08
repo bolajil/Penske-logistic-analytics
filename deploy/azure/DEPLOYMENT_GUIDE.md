@@ -1520,6 +1520,27 @@ Predicted demand for tomorrow: 1320 shipments
 | 6. Deploy Model | Create endpoint | `*.inference.ml.azure.com` |
 | 7. Predictions | Call endpoint API | Real-time results |
 
+### Azure ML Studio URLs - View Your Results
+
+After each step, you can view your resources in Azure ML Studio:
+
+| Resource | URL |
+|----------|-----|
+| **ML Studio Home** | https://ml.azure.com |
+| **Training Data** | https://ml.azure.com → Data → Data assets |
+| **Training Jobs** | https://ml.azure.com → Jobs |
+| **Model Artifacts** | https://ml.azure.com → Models |
+| **Endpoints** | https://ml.azure.com → Endpoints → Real-time endpoints |
+| **Compute Clusters** | https://ml.azure.com → Compute → Compute clusters |
+| **Experiments & Metrics** | https://ml.azure.com → Jobs → (select job) → Metrics |
+
+**Direct workspace link:**
+```
+https://ml.azure.com/experiments?wsid=/subscriptions/{SUBSCRIPTION_ID}/resourceGroups/penske-rg/providers/Microsoft.MachineLearningServices/workspaces/penske-ml-workspace
+```
+
+> **Tip:** Replace `{SUBSCRIPTION_ID}` with your Azure subscription ID. Find it by running: `az account show --query id -o tsv`
+
 ### Azure ML Costs
 
 | Resource | Use Case | Cost |
