@@ -19,12 +19,14 @@ streamlit run streamlit_dashboard.py
 ```
 **URL:** http://localhost:8501
 
-### Gradio
+### Gradio (Enhanced - Recommended)
 ```bash
 cd app
-python gradio_app.py
+python gradio_app_enhanced.py
 ```
 **URL:** http://localhost:7860
+
+**Features:** Interactive charts, analytics dashboard, demand forecasting, AI assistant
 
 ### React
 ```bash
@@ -44,7 +46,8 @@ npm run dev
 app/
 ├── README.md                 # This file
 ├── streamlit_dashboard.py    # Streamlit dashboard (default)
-├── gradio_app.py             # Gradio alternative
+├── gradio_app_enhanced.py    # Gradio with charts & analytics (recommended)
+├── gradio_simple.py          # Lightweight Gradio version
 ├── api_server.py             # FastAPI backend
 ├── FRONTEND_TEMPLATES.md     # Detailed templates & code
 └── react-frontend/           # React application

@@ -340,9 +340,16 @@ if __name__ == "__main__":
     print("URL: http://localhost:7860")
     print("=" * 60)
     
-    app.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        css=custom_css
-    )
+    try:
+        app.launch(
+            server_name="127.0.0.1",
+            server_port=7860,
+            share=False
+        )
+    except ValueError:
+        # Fallback for environments where localhost is not accessible
+        app.launch(
+            server_name="127.0.0.1",
+            server_port=7860,
+            share=True
+        )
