@@ -65,3 +65,7 @@ Thumbs.db
 # Coverage
 .coverage
 htmlcov/
+
+# Node
+node_modules/
+package-lock.json
