@@ -46,8 +46,9 @@ npm run dev
 app/
 ├── README.md                 # This file
 ├── streamlit_dashboard.py    # Streamlit dashboard (default)
-├── gradio_app_enhanced.py    # Gradio with charts & analytics (recommended)
-├── gradio_simple.py          # Lightweight Gradio version
+├── gradio_app_enhanced.py    # Gradio with charts & analytics
+├── run_gradio.sh             # Launcher script (Git Bash)
+├── run_gradio.bat            # Launcher script (Windows)
 ├── api_server.py             # FastAPI backend
 ├── FRONTEND_TEMPLATES.md     # Detailed templates & code
 └── react-frontend/           # React application
