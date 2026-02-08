@@ -197,14 +197,7 @@ custom_css = """
 """
 
 # Create the app
-with gr.Blocks(
-    title="Penske Logistics Analytics",
-    theme=gr.themes.Soft(
-        primary_hue="blue",
-        secondary_hue="indigo"
-    ),
-    css=custom_css
-) as app:
+with gr.Blocks(title="Penske Logistics Analytics") as app:
     
     # Header
     gr.Markdown("""
@@ -226,7 +219,7 @@ with gr.Blocks(
             label="🤖 LLM Provider",
             scale=1
         )
-        gr.Markdown("", scale=2)
+        gr.Markdown("")
     
     gr.Markdown("---")
     
@@ -322,14 +315,11 @@ with gr.Blocks(
                 chat_with_ai,
                 additional_inputs=[llm_provider, temperature],
                 examples=[
-                    "Summarize today's delivery performance",
-                    "What are the main causes of delays this week?",
-                    "Predict demand for next week"
+                    ["Summarize today's delivery performance", "Demo Mode", 0.7],
+                    ["What are the main causes of delays this week?", "Demo Mode", 0.7],
+                    ["Predict demand for next week", "Demo Mode", 0.7]
                 ],
-                title="",
-                retry_btn="🔄 Retry",
-                undo_btn="↩️ Undo",
-                clear_btn="🗑️ Clear"
+                title=""
             )
     
     # Footer
@@ -353,5 +343,6 @@ if __name__ == "__main__":
     app.launch(
         server_name="0.0.0.0",
         server_port=7860,
-        share=False
+        share=False,
+        css=custom_css
     )
