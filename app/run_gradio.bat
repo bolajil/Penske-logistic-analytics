@@ -1,0 +1,3 @@
+@echo off
+echo Starting Gradio Analytics...
+C:\Users\bolaf\anaconda3\python.exe "%~dp0gradio_app_enhanced.py"
