@@ -11,6 +11,7 @@ joblib
 
 # Web Framework
 streamlit
+gradio
 fastapi
 uvicorn
 plotly
