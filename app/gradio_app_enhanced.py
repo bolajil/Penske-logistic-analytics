@@ -593,7 +593,7 @@ with gr.Blocks(title="Penske Logistics Analytics") as demo:
             gr.Markdown("### AI-Powered Logistics Assistant")
             gr.Markdown("Ask questions about performance, delays, forecasts, or cost optimization.")
             
-            chatbot = gr.Chatbot(label="Chat", height=400, type="tuples")
+            chatbot = gr.Chatbot(label="Chat", height=400)
             msg = gr.Textbox(label="Your question", placeholder="How is the fleet performing today?")
             
             with gr.Row():
@@ -611,11 +611,11 @@ with gr.Blocks(title="Penske Logistics Analytics") as demo:
                 if not message:
                     return "", chat_history
                 response = chat_response(message, chat_history)
-                chat_history = chat_history + [(message, response)]
+                chat_history = chat_history + [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": response}
+                ]
                 return "", chat_history
-            
-            def quick_prompt(prompt, chat_history):
-                return respond(prompt, chat_history)
             
             send_btn.click(respond, [msg, chatbot], [msg, chatbot])
             msg.submit(respond, [msg, chatbot], [msg, chatbot])
