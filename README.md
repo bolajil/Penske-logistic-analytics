@@ -12,6 +12,8 @@ A comprehensive ML-powered analytics solution for Penske Logistics to analyze se
 | **ML Techniques** | XGBoost, Random Forest, LSTM, Clustering, Classification |
 | **GenAI Integration** | LLM-powered insights for operational recommendations |
 | **Tech Stack** | Python, Pandas, Scikit-learn, TensorFlow, Streamlit, FastAPI |
+| **RAG / Search** | LangChain, BM25 + Vector Hybrid Search, FAISS, Azure AI Search |
+| **Cloud** | Azure (primary), AWS, GCP deployment configs |
 
 ---
 
@@ -52,6 +54,7 @@ penske-logistics-analytics/
 │   ├── resource_prediction.py     # Resource allocation ML models
 │   ├── customer_acquisition.py    # Customer targeting models
 │   ├── genai_insights.py          # GenAI integration
+│   ├── cloud_ai_services.py       # Cloud AI + Hybrid Search (BM25 + Vector)
 │   └── utils.py                   # Utility functions
 ├── models/                        # Saved model artifacts
 │   └── .gitkeep
@@ -67,8 +70,12 @@ penske-logistics-analytics/
 │   ├── kubernetes/
 │   │   ├── deployment.yaml
 │   │   └── service.yaml
-│   └── azure/
-│       └── azure-pipelines.yml
+│   ├── aws/                       # AWS ECS/Fargate deployment
+│   │   └── DEPLOYMENT_GUIDE.md
+│   ├── azure/                     # Azure Container Apps deployment
+│   │   └── DEPLOYMENT_GUIDE.md
+│   └── gcp/                       # GCP Cloud Run deployment
+│       └── DEPLOYMENT_GUIDE.md
 └── notebooks/
     ├── 01_data_exploration.ipynb
     ├── 02_performance_analysis.ipynb
@@ -100,6 +107,108 @@ penske-logistics-analytics/
 - **Churn Prediction** - retain at-risk customers
 - **Cross-sell Opportunities** - service expansion potential
 - **Market Expansion** - geographic opportunity analysis
+
+---
+
+## Hybrid Search (BM25 + Vector)
+
+The `HybridSearchService` in `src/cloud_ai_services.py` combines keyword search (BM25) with semantic vector search for best-of-both-worlds retrieval.
+
+### Why Hybrid?
+
+| Query Type | BM25 Only | Vector Only | Hybrid |
+|-----------|-----------|-------------|--------|
+| Exact IDs: `"PEN-2026-001"` | ✅ | ❌ | ✅ |
+| Semantic: `"how to handle damaged freight"` | ❌ | ✅ | ✅ |
+| Mixed: `"DOT 49-CFR-395 parking rules"` | 🟡 | 🟡 | ✅ |
+
+### Quick Start — Local (FAISS + BM25)
+
+```python
+from src.cloud_ai_services import HybridSearchService
+
+# 1. Initialize
+search = HybridSearchService(
+    bm25_weight=0.4,      # 40% keyword matching
+    vector_weight=0.6,    # 60% semantic similarity
+    vector_store_type="faiss"
+)
+
+# 2. Connect to embedding provider
+search.connect_azure_openai(
+    endpoint="https://your-resource.openai.azure.com/",
+    api_key="your-key"
+)
+# Or: search.connect_openai(api_key="your-key")
+
+# 3. Index documents (with optional metadata)
+docs = [
+    "Procedure for handling damaged freight: file claim within 24 hours",
+    "DOT regulation 49-CFR-395 covers hours of service for drivers",
+    "Shipment PEN-2026-001 routed through Oklahoma City",
+    "Overnight parking policy requires driver check-in by 10pm",
+    "Hazmat handling requires certified carrier and special documentation",
+]
+metadatas = [
+    {"type": "sop", "dept": "claims"},
+    {"type": "regulation", "dept": "compliance"},
+    {"type": "shipment", "dept": "operations"},
+    {"type": "policy", "dept": "safety"},
+    {"type": "sop", "dept": "hazmat"},
+]
+search.add_documents(docs, metadatas=metadatas)
+
+# 4. Search — hybrid combines BM25 + vector results
+results = search.search("DOT regulation 49-CFR-395", k=3)
+for r in results:
+    print(f"[Rank {r['rank']}] {r['content']}")
+    print(f"  Metadata: {r['metadata']}")
+
+# 5. Tune weights on the fly
+search.update_weights(bm25_weight=0.7, vector_weight=0.3)  # Favor exact match
+
+# 6. Check index stats
+print(search.get_stats())
+```
+
+### Production — Azure AI Search (Native Hybrid)
+
+Azure AI Search handles BM25 + vector natively — no local index needed:
+
+```python
+from src.cloud_ai_services import HybridSearchService
+
+search = HybridSearchService()
+search.connect_azure_search(
+    search_endpoint="https://your-search.search.windows.net",
+    search_key="your-search-key",
+    index_name="penske-knowledge-base",
+    openai_endpoint="https://your-resource.openai.azure.com/",
+    openai_key="your-openai-key"
+)
+
+# Search works the same way
+results = search.search("how to handle overnight parking?", k=5)
+```
+
+### Available Methods
+
+| Method | Description |
+|--------|-------------|
+| `connect_azure_openai(endpoint, api_key)` | Use Azure OpenAI for embeddings |
+| `connect_openai(api_key)` | Use OpenAI directly for embeddings |
+| `add_documents(texts, metadatas)` | Index docs into BM25 + FAISS/Chroma |
+| `connect_azure_search(...)` | Connect to Azure AI Search (native hybrid) |
+| `search(query, k)` | Run hybrid search, return ranked results |
+| `search_with_scores(query, k)` | Vector search with similarity scores |
+| `update_weights(bm25, vector)` | Adjust keyword vs semantic balance |
+| `get_stats()` | Return index statistics |
+
+### Dependencies
+
+```bash
+pip install langchain langchain-community langchain-openai langchain-core faiss-cpu rank-bm25
+```
 
 ---
 
@@ -149,18 +258,63 @@ uvicorn app.api_server:app --reload
 
 ## Deployment Options
 
-See `DEPLOYMENT.md` for detailed instructions on:
-- **Local Development** - Docker Compose setup
-- **Cloud Deployment** - Azure/AWS/GCP configurations
-- **Kubernetes** - Production-scale deployment
-- **CI/CD Pipeline** - Automated testing and deployment
+See [`DEPLOYMENT.md`](DEPLOYMENT.md) for full details, or jump to a specific platform:
+
+| Platform | Guide | Best For | Est. Cost |
+|----------|-------|----------|----------|
+| **Local Docker** | [`DEPLOYMENT.md`](DEPLOYMENT.md) | Development / Demo | Free |
+| **AWS ECS/Fargate** | [`deploy/aws/DEPLOYMENT_GUIDE.md`](deploy/aws/DEPLOYMENT_GUIDE.md) | Enterprise AWS shops | ~$50-100/mo |
+| **Azure Container Apps** | [`deploy/azure/DEPLOYMENT_GUIDE.md`](deploy/azure/DEPLOYMENT_GUIDE.md) | Microsoft ecosystem | ~$40-80/mo |
+| **GCP Cloud Run** | [`deploy/gcp/DEPLOYMENT_GUIDE.md`](deploy/gcp/DEPLOYMENT_GUIDE.md) | Pay-per-use, scale-to-zero | ~$20-60/mo |
+| **Kubernetes** | [`DEPLOYMENT.md`](DEPLOYMENT.md#option-3-kubernetes-deployment) | Production at scale | Varies |
+
+### Quick Deploy
+
+```bash
+# Docker Compose (local)
+cd deploy && docker-compose up -d
+# → Dashboard: http://localhost:8501
+# → API:       http://localhost:8000
+
+# AWS
+cd deploy/aws && ./deploy.sh
+
+# Azure
+cd deploy/azure && ./deploy.sh
+
+# GCP
+cd deploy/gcp && ./deploy.sh
+```
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OPENAI_API_KEY` | No | OpenAI / Azure OpenAI key for GenAI + Hybrid Search |
+| `AZURE_SEARCH_ENDPOINT` | No | Azure AI Search endpoint (for production hybrid search) |
+| `AZURE_SEARCH_KEY` | No | Azure AI Search admin key |
+| `PYTHONPATH` | Yes (containers) | Set to `/app` |
+| `LOG_LEVEL` | No | INFO / DEBUG / WARNING |
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [`DEPLOYMENT.md`](DEPLOYMENT.md) | Full deployment guide (Docker, K8s, Cloud) |
+| [`deploy/README.md`](deploy/README.md) | Cloud deployment overview + architecture |
+| [`deploy/aws/DEPLOYMENT_GUIDE.md`](deploy/aws/DEPLOYMENT_GUIDE.md) | AWS ECS/Fargate step-by-step |
+| [`DEMO_GUIDE.md`](DEMO_GUIDE.md) | Step-by-step demo instructions |
 
 ---
 
 ## Next Steps
 
-- [ ] Integrate with Penske's existing data warehouse
-- [ ] Set up real-time data streaming
+- [ ] Integrate with Penske's existing data warehouse (Snowflake)
+- [ ] Set up real-time data streaming (Azure Event Hubs)
+- [ ] Deploy hybrid search knowledge base to Azure AI Search
 - [ ] Implement A/B testing framework
-- [ ] Add alerting and monitoring
+- [ ] Add alerting and monitoring (Azure Monitor + LangSmith)
+- [ ] Build MCP servers for agent tool integrations
 - [ ] Develop mobile dashboard
