@@ -34,7 +34,10 @@ pytest
 langchain>=0.1.0
 langchain-openai>=0.0.5
 langchain-community>=0.0.20
+langchain-core>=0.1.0
 chromadb>=0.4.0
+faiss-cpu>=1.7.4
+rank-bm25>=0.2.2
 
 # Cloud SDKs (optional - install based on deployment target)
 # boto3

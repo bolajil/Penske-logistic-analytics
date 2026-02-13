@@ -4,8 +4,8 @@ Provides unified interface for AWS SageMaker, Azure OpenAI/ML, and GCP Vertex AI
 """
 
 import os
-from typing import Optional, Dict, Any, List
-from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from dataclasses import dataclass, field
 from enum import Enum
 
 
@@ -254,6 +254,243 @@ class VertexAIService:
         except Exception as e:
             print(f"List endpoints error: {e}")
             return []
+
+
+class HybridSearchService:
+    """Hybrid search combining BM25 (keyword) + Vector (semantic) search via LangChain.
+    
+    BM25 excels at exact-match queries (shipment IDs, regulation numbers).
+    Vector search excels at semantic queries ("how do I handle damaged freight?").
+    Combined, they cover both use cases with weighted score fusion.
+    
+    Usage:
+        service = HybridSearchService()
+        service.connect_azure_openai(endpoint="...", api_key="...")
+        service.add_documents(["doc1", "doc2", ...], metadatas=[{...}, ...])
+        results = service.search("DOT regulation 49-CFR-395", k=5)
+    """
+    
+    def __init__(
+        self,
+        bm25_weight: float = 0.4,
+        vector_weight: float = 0.6,
+        vector_store_type: str = "faiss",
+        embedding_model: str = "text-embedding-ada-002"
+    ):
+        self.bm25_weight = bm25_weight
+        self.vector_weight = vector_weight
+        self.vector_store_type = vector_store_type
+        self.embedding_model = embedding_model
+        self.embeddings = None
+        self.bm25_retriever = None
+        self.vector_retriever = None
+        self.hybrid_retriever = None
+        self.vector_store = None
+        self._documents: List[str] = []
+    
+    def connect_azure_openai(self, endpoint: str, api_key: str) -> bool:
+        """Initialize Azure OpenAI embeddings for vector search."""
+        try:
+            from langchain_openai import AzureOpenAIEmbeddings
+            self.embeddings = AzureOpenAIEmbeddings(
+                model=self.embedding_model,
+                azure_endpoint=endpoint,
+                api_key=api_key
+            )
+            return True
+        except Exception as e:
+            print(f"Azure OpenAI embeddings connection error: {e}")
+            return False
+    
+    def connect_openai(self, api_key: str) -> bool:
+        """Initialize OpenAI embeddings for vector search."""
+        try:
+            from langchain_openai import OpenAIEmbeddings
+            self.embeddings = OpenAIEmbeddings(
+                model=self.embedding_model,
+                api_key=api_key
+            )
+            return True
+        except Exception as e:
+            print(f"OpenAI embeddings connection error: {e}")
+            return False
+    
+    def add_documents(
+        self,
+        texts: List[str],
+        metadatas: Optional[List[Dict[str, Any]]] = None
+    ) -> bool:
+        """Add documents to both BM25 and vector indexes.
+        
+        Args:
+            texts: List of document strings to index
+            metadatas: Optional metadata dicts for each document
+            
+        Returns:
+            True if both indexes built successfully
+        """
+        if not self.embeddings:
+            print("Error: Connect to an embedding provider first.")
+            return False
+        
+        try:
+            from langchain_community.retrievers import BM25Retriever
+            from langchain.retrievers import EnsembleRetriever
+            from langchain_core.documents import Document
+            
+            self._documents = texts
+            docs = [
+                Document(page_content=t, metadata=metadatas[i] if metadatas else {})
+                for i, t in enumerate(texts)
+            ]
+            
+            # BM25 retriever (keyword search)
+            self.bm25_retriever = BM25Retriever.from_documents(docs)
+            self.bm25_retriever.k = 5
+            
+            # Vector retriever (semantic search)
+            if self.vector_store_type == "faiss":
+                from langchain_community.vectorstores import FAISS
+                self.vector_store = FAISS.from_documents(docs, self.embeddings)
+            elif self.vector_store_type == "chroma":
+                from langchain_community.vectorstores import Chroma
+                self.vector_store = Chroma.from_documents(docs, self.embeddings)
+            else:
+                print(f"Unsupported vector store type: {self.vector_store_type}")
+                return False
+            
+            self.vector_retriever = self.vector_store.as_retriever(
+                search_kwargs={"k": 5}
+            )
+            
+            # Combine into hybrid retriever
+            self.hybrid_retriever = EnsembleRetriever(
+                retrievers=[self.bm25_retriever, self.vector_retriever],
+                weights=[self.bm25_weight, self.vector_weight]
+            )
+            
+            print(f"Indexed {len(texts)} documents (BM25 + {self.vector_store_type.upper()} vector store)")
+            return True
+        except Exception as e:
+            print(f"Error building indexes: {e}")
+            return False
+    
+    def connect_azure_search(
+        self,
+        search_endpoint: str,
+        search_key: str,
+        index_name: str,
+        openai_endpoint: str,
+        openai_key: str
+    ) -> bool:
+        """Connect to Azure AI Search with built-in hybrid search.
+        
+        Azure AI Search handles BM25 + vector natively, no EnsembleRetriever needed.
+        """
+        try:
+            from langchain_openai import AzureOpenAIEmbeddings
+            from langchain_community.vectorstores import AzureSearch
+            
+            self.embeddings = AzureOpenAIEmbeddings(
+                model=self.embedding_model,
+                azure_endpoint=openai_endpoint,
+                api_key=openai_key
+            )
+            
+            self.vector_store = AzureSearch(
+                azure_search_endpoint=search_endpoint,
+                azure_search_key=search_key,
+                index_name=index_name,
+                embedding_function=self.embeddings.embed_query,
+                search_type="hybrid"
+            )
+            
+            self.hybrid_retriever = self.vector_store.as_retriever(
+                search_type="hybrid",
+                search_kwargs={"k": 5}
+            )
+            
+            print(f"Connected to Azure AI Search index: {index_name} (hybrid mode)")
+            return True
+        except Exception as e:
+            print(f"Azure AI Search connection error: {e}")
+            return False
+    
+    def search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Run hybrid search and return ranked results.
+        
+        Args:
+            query: Search query string
+            k: Number of results to return
+            
+        Returns:
+            List of dicts with 'content', 'metadata', and 'rank' keys
+        """
+        if not self.hybrid_retriever:
+            print("Error: Add documents or connect to Azure Search first.")
+            return []
+        
+        try:
+            results = self.hybrid_retriever.invoke(query)
+            return [
+                {
+                    "content": doc.page_content,
+                    "metadata": doc.metadata,
+                    "rank": i + 1
+                }
+                for i, doc in enumerate(results[:k])
+            ]
+        except Exception as e:
+            print(f"Search error: {e}")
+            return []
+    
+    def search_with_scores(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Run vector search with similarity scores (vector store only).
+        
+        Note: BM25 scores are not directly comparable to vector scores,
+        so this uses vector search only for score-aware retrieval.
+        """
+        if not self.vector_store:
+            print("Error: Vector store not initialized.")
+            return []
+        
+        try:
+            results = self.vector_store.similarity_search_with_score(query, k=k)
+            return [
+                {
+                    "content": doc.page_content,
+                    "metadata": doc.metadata,
+                    "score": float(score),
+                    "rank": i + 1
+                }
+                for i, (doc, score) in enumerate(results)
+            ]
+        except Exception as e:
+            print(f"Scored search error: {e}")
+            return []
+    
+    def update_weights(self, bm25_weight: float, vector_weight: float) -> None:
+        """Adjust the BM25 vs vector weight balance.
+        
+        Higher BM25 weight → better for exact-match queries (IDs, codes).
+        Higher vector weight → better for semantic queries (natural language).
+        """
+        self.bm25_weight = bm25_weight
+        self.vector_weight = vector_weight
+        if self.hybrid_retriever and hasattr(self.hybrid_retriever, 'weights'):
+            self.hybrid_retriever.weights = [bm25_weight, vector_weight]
+            print(f"Updated weights: BM25={bm25_weight}, Vector={vector_weight}")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Return current index statistics."""
+        return {
+            "total_documents": len(self._documents),
+            "vector_store_type": self.vector_store_type,
+            "embedding_model": self.embedding_model,
+            "bm25_weight": self.bm25_weight,
+            "vector_weight": self.vector_weight,
+            "hybrid_ready": self.hybrid_retriever is not None
+        }
 
 
 # Demo mode responses for when credentials are not configured
