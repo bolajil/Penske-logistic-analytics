@@ -32,6 +32,194 @@ The model doesn't see words — it sees these chunks. Common words like "the" = 
 **Penske example:**
 > "When building our shipment tracking agent, I'd be careful with tokenization of carrier codes and shipment IDs. IDs like 'PEN-2026-001' tokenize into multiple pieces. If the model needs to compare or extract these, I'd design prompts that treat IDs as atomic units — always quoted, always complete — to avoid partial matching errors."
 
+### Deep Dive: How PEN- and DOT- IDs Get Tokenized, Embedded, and Retrieved Without Hallucination
+
+Your documents contain structured IDs like `PEN-2026-001`, `PEN-2026-002`, `DOT-49-CFR-395`, `DOT-49-CFR-172`. Here's exactly what happens at each stage — and how to prevent the model from confusing or hallucinating them.
+
+**Step 1: Tokenization — the IDs get shattered**
+
+```
+ID: "PEN-2026-001"
+Tokens (GPT-4 / cl100k_base tokenizer):
+  ["PEN", "-", "202", "6", "-", "001"]  →  6 tokens
+
+ID: "PEN-2026-002"
+Tokens:
+  ["PEN", "-", "202", "6", "-", "002"]  →  6 tokens
+                                     ↑
+                            Only THIS token differs!
+
+ID: "DOT-49-CFR-395"
+Tokens:
+  ["DOT", "-", "49", "-", "CF", "R", "-", "395"]  →  8 tokens
+
+ID: "DOT-49-CFR-172"
+Tokens:
+  ["DOT", "-", "49", "-", "CF", "R", "-", "172"]  →  8 tokens
+                                          ↑
+                                   Only THIS differs!
+```
+
+**The problem:** `PEN-2026-001` and `PEN-2026-002` share 5 out of 6 tokens. The model sees them as ~83% identical at the token level. Same with the DOT regulations — they look almost the same to the tokenizer.
+
+**Step 2: Embedding — similar IDs collapse into nearby vectors**
+
+```
+Embedding "PEN-2026-001":  [0.234, -0.871, 0.453, 0.119, ...]
+Embedding "PEN-2026-002":  [0.231, -0.869, 0.455, 0.121, ...]
+                            ↑ nearly identical vectors!
+
+Cosine similarity: 0.997  ← The embedding model thinks these are 
+                             basically the same thing.
+
+Embedding "DOT-49-CFR-395": [0.412, 0.223, -0.567, 0.891, ...]
+Embedding "DOT-49-CFR-172": [0.409, 0.226, -0.564, 0.888, ...]
+
+Cosine similarity: 0.995  ← Again, almost indistinguishable.
+```
+
+**This is why pure vector search halluccinates on IDs.** You ask for `PEN-2026-001` and it returns `PEN-2026-002` because the vectors are nearly identical. The embedding model captures *meaning* ("this is a Penske shipment from 2026") but **loses the identity** ("which specific shipment?").
+
+**Step 3: The Solution — How to Store and Retrieve IDs Without Hallucination**
+
+There are **three strategies** that work together:
+
+**Strategy 1: Store IDs as exact-match metadata (not just in the embedding)**
+
+```python
+# BAD: ID buried in the text chunk, relying only on vector search
+chunk = {
+    "text": "Shipment PEN-2026-001 was delayed due to ice storm on I-35...",
+    "embedding": [0.234, -0.871, ...]   # vector search only
+}
+
+# GOOD: ID extracted into searchable metadata fields
+chunk = {
+    "text": "Shipment PEN-2026-001 was delayed due to ice storm on I-35...",
+    "embedding": [0.234, -0.871, ...],
+    "metadata": {
+        "shipment_id": "PEN-2026-001",      # ← exact-match filterable
+        "regulation_ids": [],
+        "doc_type": "incident_report",
+        "route": "CHI-DAL"
+    }
+}
+```
+
+Now you can filter by `shipment_id = "PEN-2026-001"` **before** vector search runs — guaranteed exact match.
+
+**Strategy 2: Hybrid search — BM25 catches what embeddings miss**
+
+```
+User query: "What happened with shipment PEN-2026-001?"
+
+VECTOR SEARCH (semantic):
+  Query embedding → finds chunks about "shipment delays" 
+  Returns: PEN-2026-001 (score: 0.94)
+           PEN-2026-002 (score: 0.93)  ← WRONG but close vector
+           PEN-2025-048 (score: 0.91)  ← WRONG but similar topic
+  Problem: Can't distinguish between shipment IDs!
+
+BM25 SEARCH (keyword/exact):
+  Searches for literal string "PEN-2026-001"
+  Returns: PEN-2026-001 (score: 18.4)  ← EXACT match
+           PEN-2026-0011 (score: 0)    ← No partial match
+  
+HYBRID (combined):
+  BM25 pins the exact ID → Vector adds semantic context
+  Final result: Only PEN-2026-001 chunks, ranked by relevance ✓
+```
+
+```python
+# Implementation with the HybridSearchService
+from cloud_ai_services import HybridSearchService
+
+hybrid = HybridSearchService(bm25_weight=0.6, vector_weight=0.4)
+# ↑ Weight BM25 higher when queries contain IDs
+
+hybrid.connect_azure_openai(endpoint=ENDPOINT, api_key=KEY)
+hybrid.add_documents(
+    texts=[
+        "Shipment PEN-2026-001 delayed 90 min due to ice storm on I-35 near OKC.",
+        "Shipment PEN-2026-002 delivered on time via I-40 alternate route.",
+        "DOT-49-CFR-395 requires drivers to log 10-hour rest periods.",
+        "DOT-49-CFR-172 governs hazmat labeling and placarding requirements."
+    ],
+    metadatas=[
+        {"shipment_id": "PEN-2026-001", "type": "incident"},
+        {"shipment_id": "PEN-2026-002", "type": "delivery"},
+        {"regulation_id": "DOT-49-CFR-395", "type": "regulation"},
+        {"regulation_id": "DOT-49-CFR-172", "type": "regulation"}
+    ]
+)
+
+# Query with an ID → BM25 catches the exact match
+results = hybrid.search("What happened with PEN-2026-001?")
+# Returns ONLY the PEN-2026-001 chunk, not PEN-2026-002
+```
+
+**Strategy 3: Prompt design — treat IDs as atomic units**
+
+```
+# BAD prompt: ID can get confused or partially generated
+"Tell me about shipment PEN-2026-001"
+
+# GOOD prompt: ID is quoted and the model is instructed to match exactly
+System prompt:
+  "When the user references a shipment ID (format: PEN-YYYY-NNN) or 
+   regulation ID (format: DOT-XX-CFR-NNN), you MUST match it exactly.
+   Never substitute a similar ID. If you cannot find an exact match, 
+   say 'I could not find shipment [ID] in the knowledge base.'
+   Always quote IDs exactly as given."
+
+User: "What happened with shipment 'PEN-2026-001'?"
+
+# The model now knows:
+# 1. PEN-2026-001 is an atomic unit — don't break it apart
+# 2. Must match exactly — don't return PEN-2026-002
+# 3. Admit uncertainty rather than hallucinate a wrong ID
+```
+
+**The complete retrieval pipeline for ID-heavy documents:**
+
+```
+User asks: "Show me the delay report for PEN-2026-001 and 
+            which DOT regulations apply"
+
+Step 1: EXTRACT IDs from the query
+  → Regex: PEN-\d{4}-\d{3}  → found: PEN-2026-001
+  → Regex: DOT-\d+-CFR-\d+  → found: none (but "DOT regulations" detected)
+
+Step 2: ROUTE the query
+  ├── ID lookup: PEN-2026-001 → metadata filter (exact match)
+  └── Semantic: "DOT regulations for delays" → hybrid search
+
+Step 3: RETRIEVE
+  ├── Metadata filter: shipment_id = "PEN-2026-001" → 3 chunks found
+  └── Hybrid search: "DOT regulations delays" → DOT-49-CFR-395 (driver hours)
+
+Step 4: GENERATE answer with retrieved context
+  LLM sees the actual chunks — no hallucination because it's grounded
+  in the exact PEN-2026-001 data, not a similar-looking ID.
+
+Result: "Shipment PEN-2026-001 was delayed 90 minutes on 01/15/2026 
+         due to an ice storm on I-35. The relevant DOT regulation is 
+         49-CFR-395, which requires 10-hour rest periods — the driver 
+         had to pause before rerouting via I-40."
+```
+
+**Summary — preventing ID hallucination:**
+
+| Strategy | What It Does | When It Kicks In |
+|----------|-------------|-----------------|
+| **Metadata extraction** | Store IDs as filterable fields, not just embedded text | At ingestion time |
+| **Hybrid search (BM25 + Vector)** | BM25 catches exact ID strings that vectors blur together | At query time |
+| **ID-aware prompting** | Tell the model to treat IDs as atomic, match exactly, admit if not found | At generation time |
+| **Regex pre-processing** | Extract IDs from queries before search, route to exact-match path | At query time |
+| **Weight tuning** | Increase BM25 weight (0.6-0.7) for ID-heavy queries | At query time |
+
+> **Key insight:** Embeddings are semantic — they understand *meaning* but blur *identity*. For IDs like PEN-2026-001 vs PEN-2026-002, you need exact-match mechanisms (metadata filters, BM25, regex) working alongside embeddings. The embedding finds "shipment delay reports," and the exact-match layer pins it to the right shipment.
+
 ---
 
 ## "How do embeddings actually represent meaning?"
@@ -887,6 +1075,549 @@ STEP 5: VERIFY
 
 **What this demonstrates:**
 > "I follow the signal. Data wrong? Fix the source. Retrieval wrong? Fix the search. Generation wrong? Fix the prompt or add verification. I don't just slap a prompt patch — I trace back to the root cause and fix it at the right layer."
+
+---
+
+# 8. AI Engineer Deep Dive (REQ 20296-1)
+
+## Q1: "Describe your experience with ontology frameworks. How have you used them in practice, and what are the key design and governance practices you follow?"
+
+### How I've used ontology frameworks
+
+I've applied ontology frameworks in **enterprise knowledge systems**, **RAG pipelines**, and **semantic search platforms**. My work involves:
+
+- Designing **domain schemas** that unify structured + unstructured data
+- Creating **entity hierarchies**, **relationships**, and **semantic types** to improve retrieval
+- Using ontologies to drive **context-aware routing**, **tool selection**, and **agent reasoning**
+- Mapping ingestion pipelines to ontology classes for **consistent metadata and embeddings**
+
+**Frameworks I've used:**
+
+| Framework | What It Is | When To Use |
+|-----------|-----------|-------------|
+| **RDF/OWL** | W3C standard for formal ontologies with reasoning/inference | Healthcare, academic, strict logic environments |
+| **SKOS** | Lightweight — concepts, labels, broader/narrower relationships | Taxonomies, glossaries, tagging — most enterprise use cases |
+| **Schema.org** | Shared vocabulary for structured web data | Integrating with external systems or web content |
+| **Custom JSON-LD / knowledge graphs** | Flexible, developer-friendly | Domain-specific systems needing speed |
+| **Neo4j + Cypher** | Graph database with query language | When relationships ARE the data — supply chain networks |
+| **FHIR** | Healthcare interoperability standard | Health data ontologies |
+
+### Penske logistics ontology — concrete example
+
+```
+CONCEPTS:  Shipment, Route, Driver, Vehicle, Customer, Warehouse, Carrier
+
+RELATIONSHIPS:
+  Shipment ─── assigned_to ───→ Driver
+  Shipment ─── uses ──────────→ Route
+  Driver   ─── operates ──────→ Vehicle
+  Shipment ─── picked_up_at ──→ Warehouse
+  Shipment ─── delivered_to ──→ Customer
+  Carrier  ─── transports ────→ Shipment
+```
+
+**Why this matters in practice:**
+
+| Without Ontology | With Ontology |
+|-----------------|---------------|
+| Agent doesn't know "carrier" and "trucking company" mean the same thing | Synonyms mapped — both resolve to `Carrier` entity |
+| Search for "late deliveries" misses docs about "delayed shipments" | Ontology links "late delivery" = "delayed shipment" = "missed ETA" |
+| Knowledge base has inconsistent field names across teams | Single source of truth for every term |
+| Agent can't reason about relationships | Agent knows `Shipment` → `Driver` → `Vehicle` → `Route` |
+
+### Key design practices
+
+1. **Start from business questions, not abstract modeling.** "Which driver has the best on-time rate on this route?" → tells me I need `Driver`, `Route`, and `Shipment` linked with a performance metric.
+2. **Use existing standards first.** Don't reinvent "Address" or "DateTime." Use Schema.org or ISO, then extend for domain-specific concepts.
+3. **Keep it shallow.** 2-3 levels max. `Vehicle > Truck > Refrigerated Truck` is fine. Going 8 levels deep becomes unmaintainable.
+4. **Design for extensibility** — versioning, optional fields, modular sub-ontologies.
+5. **Use canonical identifiers** to avoid drift across ingestion pipelines.
+6. **Separate conceptual ontology from operational schemas** (e.g., API or DB schemas).
+
+### Governance practices
+
+- **Version control + change proposals** — PR-based governance with impact analysis ("if I rename this concept, what breaks?")
+- **Schema validation in CI/CD** — automated consistency checks during ingestion
+- **Deprecation policies** for fields/classes with migration paths
+- **Documentation + examples** for every class and relationship
+- **Sync with data** — ontology maps to actual database schemas, not a separate theoretical document
+
+**Interview answer:**
+> "At Penske, I'd build a logistics ontology mapping the supply chain domain — Shipments, Routes, Drivers, Vehicles, Warehouses, Carriers, Customers. When a dispatcher asks 'show me delayed shipments for Carrier X on Route 5,' the agent understands those are linked entities and constructs the right Snowflake query. The ontology also improves RAG — searching for 'trucking company procedures' retrieves 'carrier' docs too, because the ontology knows they're synonyms. I govern it with PR-based changes, CI validation, and deprecation policies."
+
+---
+
+## Q2: "Explain agentic workflow and frameworks. How have you designed or used them in production systems?"
+
+### What agentic workflows are
+
+Agentic workflows are systems where LLMs operate as **autonomous or semi-autonomous agents** that:
+
+- **Observe** — read input, gather context from tools and memory
+- **Reason** — plan next steps, select tools
+- **Act** — call APIs, query databases, retrieve documents
+- **Reflect** — self-correct, update memory, verify results
+
+```
+       ┌─────────────────────────┐
+       │                         │
+       ▼                         │
+   OBSERVE ──→ REASON ──→ ACT ──┘
+   (input,      (plan,      (tools,
+    context)     select)     APIs)
+                   │
+                   ▼
+               REFLECT ──→ DONE? ──→ Return answer
+```
+
+### Three production patterns I use
+
+| Pattern | How It Works | When To Use | Penske Example |
+|---------|-------------|-------------|----------------|
+| **ReAct** | Think → Act → Observe → Think → ... | Open-ended investigation | "Why did Zone 5 delays spike?" — agent checks weather, traffic, driver logs, finds root cause |
+| **Plan-and-Execute** | Make full plan upfront → execute steps | Well-defined multi-step tasks | "Generate the weekly KPI report" — agent plans all data pulls, then executes in order |
+| **Router + Specialists** | Classify → route to the right sub-agent | Multiple distinct capabilities | Dispatcher question → router sends to tracking agent, SOP agent, or analytics agent |
+
+### Frameworks I've used in production
+
+| Framework | Strengths | When I Pick It |
+|-----------|----------|----------------|
+| **LangChain agents** | Rich ecosystem, great tool abstractions, fast dev | Default for most agent work — simple to moderate complexity |
+| **LangGraph** | State machines, conditional branching, human-in-the-loop, checkpointing | Complex workflows with approval gates and branching logic |
+| **OpenAI function/tool calling** | Native, low-latency, no framework overhead | Simple tool-use patterns where LangChain is overkill |
+| **Model Context Protocol (MCP)** | Standardized tool schemas, provider-agnostic | When tools need to work across multiple models/frameworks |
+| **Custom FastAPI-based orchestrators** | Full control, no framework lock-in | High-performance production systems with custom requirements |
+| **Azure AI Agent Service** | Managed, Azure-native, built-in auth + monitoring | All-in on Azure, wants minimal ops |
+| **CrewAI** | Role-based multi-agent teams | Multiple agents collaborating (researcher + writer + reviewer) |
+
+### Production example — Penske Dispatcher Assistant
+
+```
+User: "Shipment PEN-001 is late — what happened and what should I do?"
+
+Router Agent (GPT-3.5, fast classification, ~200ms)
+   ↓ classified as: "shipment_investigation"
+   
+Investigation Agent (GPT-4, ReAct pattern)
+   │
+   ├─ THINK: "I need shipment status, weather, and route info"
+   │
+   ├─ ACT: call get_shipment_status("PEN-001")
+   │  OBSERVE: {status: "delayed", location: "Oklahoma City", delay: 90min}
+   │
+   ├─ THINK: "It's delayed. Let me check why — weather on the route?"
+   │
+   ├─ ACT: call check_weather(route="CHI-DAL", date="today")
+   │  OBSERVE: {severity: "high", type: "ice storm", affected_segment: "I-35"}
+   │
+   ├─ THINK: "Ice storm on I-35. Are there alternative routes?"
+   │
+   ├─ ACT: call get_alternative_routes("CHI", "DAL", avoid=["I-35"])
+   │  OBSERVE: {route: "I-40", extra_miles: 45, time_saved: "2.5 hrs"}
+   │
+   └─ RESPOND: "Shipment PEN-001 is delayed 90 minutes due to an ice storm 
+      on I-35 near Oklahoma City. I'd recommend rerouting via I-40 — adds 
+      45 miles but avoids the storm and saves ~2.5 hours overall."
+```
+
+### How I design them for production
+
+- **Tool schemas** defined via JSON Schema or MCP — every tool has typed inputs, outputs, and descriptions
+- **Deterministic routing** for high-risk tasks — don't let the LLM freestyle on compliance or financial operations
+- **Guardrails**: input validation, output validation, safety filters. Agent can READ but never WRITE without human approval
+- **Memory layers**: short-term scratchpad (current conversation) + long-term vector memory (past interactions)
+- **Audit logging** for every agent action — every thought, action, and observation is logged
+- **Fallback strategies**: rule-based → LLM → human-in-the-loop
+- **Timeouts**: each tool call has a 10-second timeout, total agent runtime capped at 60 seconds
+- **Token budget**: track cumulative tokens, force summarize-and-respond if approaching limit
+- **Eval suite**: 200+ test scenarios run weekly to catch regressions
+
+I emphasize **predictability**, **traceability**, and **bounded autonomy**.
+
+---
+
+## Q3: "How do you think about prompt engineering versus fine-tuning when working with LLMs?"
+
+### When prompt engineering is enough
+
+- Task is **reasoning-heavy**, not knowledge-heavy
+- You need **format control**, **style**, or **workflow guidance**
+- You want **rapid iteration** without training cost
+- You need to enforce **constraints** (e.g., JSON output, safety rules)
+
+**Penske example:** "Classify this shipment exception as weather/carrier/customer" — a well-crafted system prompt with 3-5 few-shot examples nails this. No training needed.
+
+### When fine-tuning is better
+
+- Domain knowledge is **specialized** and not widely available (logistics terms: "deadhead," "drayage," "LTL")
+- You need **consistent outputs** across thousands of calls with minimal prompt drift
+- You want to reduce **prompt length** and **latency** (shorter prompts = faster + cheaper)
+- You need high-accuracy **classification**, **extraction**, or **structured tasks**
+- You want to encode **organizational voice** or **policy rules** permanently
+
+**Penske example:** After 6 months of dispatcher interactions, the model still mishandles logistics terminology. Curate 5,000 best interactions → LoRA fine-tune GPT-3.5. Result: domain-accurate at 1/60th the cost of GPT-4.
+
+### Side-by-side comparison
+
+| Factor | Prompt Engineering | Fine-Tuning |
+|--------|-------------------|-------------|
+| **Time to deploy** | Minutes to hours | Days to weeks |
+| **Cost** | Free (just words) | $50-500+ for training compute |
+| **Data needed** | 0-5 examples | 1,000-10,000+ examples |
+| **Flexibility** | Change instantly | Retrain to change behavior |
+| **Quality ceiling** | Very high with good prompts | Higher for specialized tasks |
+| **Maintenance** | Update prompt text | Retrain periodically, manage model versions |
+| **Risk** | Low — easy to roll back | Higher — catastrophic forgetting, overfitting |
+| **Best for** | Most tasks, rapid iteration | Domain vocabulary, consistent style, cost at scale |
+
+### My rule of thumb
+
+> **Prompting for behavior. Fine-tuning for knowledge or consistency.**
+
+### The hybrid approach I use in production
+
+```
+Development:     Prompt engineering (fast iteration)
+         ↓
+Evaluation:      Is accuracy > 90%? → YES → Ship it
+         ↓ NO
+Add few-shot:    Does adding 5 examples fix it? → YES → Ship it
+         ↓ NO
+Fine-tune:       LoRA on GPT-3.5 with curated data
+         ↓
+Production:      Fine-tuned model for 70% of queries (cheap, fast)
+                 + GPT-4 with prompt engineering for 30% complex queries
+```
+
+**Interview answer:**
+> "I always start with prompt engineering — it handles 90% of cases. If after a month of production data we see consistent failures in domain vocabulary or output format, I curate the best interactions and LoRA fine-tune. At Penske, the fine-tuned GPT-3.5 handles routine dispatcher queries at 1/60th the cost, while GPT-4 with prompt engineering handles the complex analysis questions. Prompting for behavior, fine-tuning for knowledge."
+
+---
+
+## Q4: "How do you pick chunk size and overlap when chunking a PDF document for retrieval?"
+
+### How I approach chunking
+
+I treat chunking as a function of four things:
+- **Document structure** — narrative vs technical vs legal
+- **Query type** — fact lookup vs reasoning
+- **Embedding model context window** — chunks can't exceed it or they get silently truncated
+- **Desired recall vs precision** — smaller chunks = more precise, larger = more context
+
+### Typical ranges by document type
+
+| Document Type | Chunk Size | Overlap | Why |
+|--------------|-----------|---------|-----|
+| **Text-heavy PDFs (SOPs, manuals)** | 300-500 tokens | 10-15% (~50-75 tokens) | Sections are self-contained, moderate size captures full procedures |
+| **Technical/medical/legal** | 800-1200 tokens | 15-20% (~100 tokens) | Precision matters, clauses reference each other |
+| **Highly structured docs** | By **semantic boundary** | N/A | Chunk by heading/section, not token count |
+| **FAQ / Q&A docs** | 1 chunk per Q&A pair | 0 | Each Q&A is a natural unit — never split question from answer |
+| **Tables** | Keep table as 1 chunk | 0 | Never split a row from its header (see Q5) |
+
+### Why these numbers matter — Penske SOP example
+
+```
+TOO SMALL (< 100 tokens):
+  "Section 4.2: Hazmat overnight procedures"
+  → Retriever finds it but LLM can't answer from just a heading.
+
+TOO LARGE (> 1000 tokens):
+  [Entire 3-page section about ALL parking procedures]
+  → Searching for "hazmat parking" also returns regular parking, visitor 
+    parking, etc. More noise = worse answers.
+
+SWEET SPOT (300-500 tokens):
+  [Complete paragraph about hazmat overnight parking with specific 
+   rules, exceptions, and Bay 7-12 references]
+  → Enough context to answer. Focused enough to be relevant.
+```
+
+### Why overlap prevents lost answers
+
+```
+WITHOUT overlap:
+  Chunk 1: "...drivers must check in by 10pm. For hazmat loads,"
+  Chunk 2: "overnight parking requires Bay 7-12 with fire suppression..."
+  → Chunk 1 ends mid-thought. Chunk 2 starts without context.
+  
+WITH 50-token overlap:
+  Chunk 1: "...drivers must check in by 10pm. For hazmat loads, overnight parking requires Bay 7-12"
+  Chunk 2: "For hazmat loads, overnight parking requires Bay 7-12 with fire suppression systems..."
+  → Both chunks capture the transition. The answer isn't lost at the boundary.
+```
+
+### My practical process
+
+```
+1. Parse structure first (headings, sections, tables)
+2. Chunk by semantic units (sections → paragraphs)
+3. Apply token-based fallback for oversized sections
+4. START with 400 tokens, 50-token overlap
+5. Build test set: 50 questions with known answers
+6. Run retrieval evaluation (precision@k, MRR, recall@5)
+7. If recall < 85%: check failures — too big (diluted) or too small (missing context)?
+8. Adjust and re-run until recall@5 > 85%
+```
+
+**Embedding model constraint:**
+> "Chunk size must fit the embedding model's context window. Ada-002 handles 8,191 tokens — plenty. But smaller models cap at 512 tokens. Chunks over 512 get silently truncated and you lose information. Always check your model's max input first."
+
+**Interview answer:**
+> "For Penske SOPs, I'd start at 400 tokens with 75-token overlap, splitting at section boundaries first, then paragraph boundaries. Tables stay as single chunks. Each chunk carries metadata: document title, section heading, effective date, department. I'd validate with 50 real dispatcher questions and tune chunk size until recall@5 exceeds 85%. The key insight is to chunk by semantic boundaries first, then use token counts as a fallback."
+
+---
+
+## Q5: "How do you handle tables when ingesting PDFs for RAG systems?"
+
+Tables are **one of the biggest failure points in RAG**. Embedding raw table text destroys structure and kills retrieval accuracy.
+
+### The core problem — Penske route performance report
+
+```
+PDF Table (visual):
+┌───────────┬──────────┬──────────┐
+│ Route     │ On-Time% │ Avg Delay│
+├───────────┼──────────┼──────────┤
+│ CHI → DAL │ 92.1%    │ 18 min   │
+│ CHI → ATL │ 87.3%    │ 34 min   │
+└───────────┴──────────┴──────────┘
+
+Naive PDF extraction (what most tools give you):
+"Route On-Time% Avg Delay CHI → DAL 92.1% 18 min CHI → ATL 87.3% 34 min"
+
+→ Structure is GONE. LLM doesn't know 92.1% belongs to CHI → DAL.
+  Ask "what's the on-time rate for Chicago to Atlanta?" → hallucinated answer.
+```
+
+### My approach — 4 steps
+
+**Step 1: Detect and extract with structure-aware tools**
+
+| Tool | How It Works | Best For |
+|------|-------------|----------|
+| **Azure Document Intelligence** | AI-powered table detection, returns structured JSON | Production — best accuracy on complex tables |
+| **Camelot / Tabula** | Rule-based PDF table extraction | Simple, well-formatted tables |
+| **Unstructured.io** | Open-source, handles mixed content (text + tables + images) | General-purpose pipeline |
+| **PyMuPDF** | Fast, reliable text + layout extraction | Lightweight extraction needs |
+| **LlamaParse** | LLM-powered document parsing | Complex layouts, mixed formats |
+
+**Step 2: Preserve structure as Markdown or key-value pairs**
+
+```python
+# BAD: Flattened text (structure destroyed)
+"Route On-Time% Avg Delay CHI → DAL 92.1% 18 min"
+
+# GOOD: Markdown table (LLMs understand this well)
+"| Route | On-Time% | Avg Delay |\n|---|---|---|\n| CHI → DAL | 92.1% | 18 min |"
+
+# ALSO GOOD: Row-by-row with headers repeated (great for embedding)
+"Route: CHI → DAL, On-Time%: 92.1%, Avg Delay: 18 min"
+"Route: CHI → ATL, On-Time%: 87.3%, Avg Delay: 34 min"
+```
+
+**Step 3: Chunk tables correctly**
+
+- **Never split a table across chunks.** A row without its header is meaningless.
+- **If table fits in one chunk (< 500 tokens)** → keep as single chunk
+- **If table is huge** → split by logical row groups, **repeat the header in every chunk**
+- **Always include the caption/title** — "Table 3: Route Performance Q4 2025" gives crucial context
+- **Store separately from text chunks** — tag with metadata: table title, page number, column names
+
+```
+CHUNK: Table 3 - Route Performance Q4 2025
+| Route | On-Time% | Avg Delay |
+|---|---|---|
+| CHI → DAL | 92.1% | 18 min |
+| CHI → ATL | 87.3% | 34 min |
+| CHI → NYC | 95.4% | 8 min |
+
+Metadata: {source: "ops_report_q4.pdf", page: 7, type: "table", title: "Route Performance"}
+```
+
+**Step 4: Dual representation for critical tables**
+
+Store **two versions** for maximum retrieval coverage:
+
+```
+Version 1 (for vector/semantic search): 
+  Natural language summary:
+  "Route performance Q4: Chicago to Dallas 92.1% on-time, 18-min avg delay. 
+   Chicago to Atlanta 87.3%, 34-min delays. Chicago to NYC best at 95.4%."
+
+Version 2 (for exact retrieval + LLM context):
+  Markdown table with full structure (as above)
+```
+
+The summary gets better semantic search hits. The table provides precise data for the LLM's answer.
+
+**Why this matters for hybrid search:** Use BM25 to find tables containing exact terms ("CHI → DAL") and vector search to find tables about "route performance metrics" — combined, the dispatcher always gets the right table.
+
+**Interview answer:**
+> "Penske's operational reports are full of tables — route KPIs, fleet utilization grids, maintenance schedules. I use Azure Document Intelligence to extract tables as structured JSON, convert to Markdown, and store as single chunks with metadata. For critical KPI tables, I also generate a natural language summary for better semantic retrieval. When a dispatcher asks 'what's the on-time rate for Chicago to Dallas?' the system retrieves the actual table and gives 92.1% — not a hallucinated number. I use hybrid search so exact route codes match via BM25 and semantic queries match via vector."
+
+---
+
+## Q6: "At a high-level, how do vector databases work, and how do you choose an embedding model?"
+
+### How vector DBs work (high-level)
+
+Vector databases store **embedding vectors** (numerical representations of meaning) and support fast similarity search.
+
+```
+STORING a Penske SOP:
+  Document: "Overnight hazmat parking requires Bay 7-12"
+       ↓
+  Embedding model converts text → vector (list of numbers)
+       ↓
+  [0.23, -0.87, 0.45, 0.12, ...] (1,536 numbers for ada-002)
+       ↓
+  Vector stored in index alongside original text + metadata
+
+SEARCHING:
+  Query: "Where do I park hazmat trucks at night?"
+       ↓
+  Same embedding model converts query → vector
+       ↓
+  [0.21, -0.85, 0.48, 0.10, ...]   ← nearly identical to stored vector!
+       ↓
+  Database finds closest vectors (cosine similarity / dot product)
+       ↓
+  Returns: "Overnight hazmat parking requires Bay 7-12" (score: 0.94)
+```
+
+**Why it works:** The embedding model maps similar **meanings** to nearby points in space. "Hazmat parking at night" and "overnight hazmat parking" produce nearly identical vectors, even though the words differ.
+
+### What vector DBs support
+
+- **Approximate nearest neighbor (ANN)** search — fast similarity retrieval
+- **Index structures** — HNSW, IVF, PQ for different speed/accuracy tradeoffs
+- **Metadata filtering** — filter by department, date, document type before similarity search
+- **Hybrid search** — keyword (BM25) + vector in one query
+- **Sharding + replication** — horizontal scaling for millions of vectors
+
+### ANN algorithms — how search stays fast
+
+| Algorithm | How It Works | Used By |
+|-----------|-------------|---------|
+| **HNSW** | Graph-based — multi-layer navigation graph | Azure AI Search, Pinecone, Weaviate |
+| **IVF** | Clusters vectors, only searches nearest clusters | FAISS, Milvus |
+| **PQ (Product Quantization)** | Compresses vectors for memory efficiency | FAISS, large-scale systems |
+| **ScaNN** | Quantization + brute force on compressed vectors | Google Vertex AI |
+
+These trade tiny accuracy (99.5% vs 100%) for massive speed gains (milliseconds vs minutes at scale).
+
+### How I choose an embedding model
+
+I evaluate based on: **task type**, **context window**, **dimensionality** (affects speed + storage), **domain specificity**, **latency/throughput**, and **open-source vs proprietary** constraints.
+
+| Model | Dimensions | Max Tokens | Quality | Cost | When To Use |
+|-------|-----------|------------|---------|------|-------------|
+| **text-embedding-3-large** | 256-3,072 | 8,191 | Best | $0.13/1M | Max quality, critical applications |
+| **text-embedding-ada-002** | 1,536 | 8,191 | Great | $0.10/1M | Default choice, proven reliability |
+| **text-embedding-3-small** | 512-1,536 | 8,191 | Good | $0.02/1M | Cost-sensitive — 5x cheaper |
+| **Voyage-large** | 1,024 | 16,000 | Excellent | $0.12/1M | Long context, code |
+| **Cohere embed-v3** | 1,024 | 512 | Very good | $0.10/1M | Multilingual, built-in reranking |
+| **BGE / E5 (open-source)** | 768-1,024 | 512 | Good | Free | Data sovereignty, offline, budget |
+| **LaBSE / multilingual-e5** | 768 | 512 | Good | Free | Multilingual on-prem |
+| **CodeBERT / StarCoder** | 768 | 512 | Good | Free | Code search, programming tasks |
+| **BioE5 / LegalBERT** | 768 | 512 | Domain-tuned | Free | Healthcare, legal verticals |
+
+### My decision flow
+
+```
+Enterprise on Azure?     → text-embedding-ada-002 (or 3-small for budget)
+Need max quality?        → text-embedding-3-large
+Need multilingual?       → Cohere embed-v3 or LaBSE
+Data can't leave infra?  → BGE-large or E5-large (self-hosted)
+Code search?             → CodeBERT or StarCoder embeddings
+Prototyping locally?     → Sentence-Transformers all-MiniLM-L6-v2
+```
+
+### Key factors most people miss
+
+1. **Once you pick a model, you're married to it.** All vectors in your index must come from the same model. Changing = re-embed everything.
+2. **Match chunk size to model context.** 512-token model + 800-token chunk = silent truncation = lost information.
+3. **Dimension size = storage + speed tradeoff.** 1,536 dims × 10M docs = 60GB of vectors alone.
+4. **Domain matters less than you'd think.** General models handle 90% of enterprise use cases. Only go domain-specific if you've measured a quality gap.
+
+**Interview answer:**
+> "For Penske on Azure, I'd use text-embedding-ada-002 in Azure AI Search — 1,536-dimension vectors, 8K token context, stays in the Azure ecosystem with built-in hybrid search. If cost becomes an issue at scale, I'd A/B test text-embedding-3-small — 5x cheaper — and switch if retrieval quality stays within 2-3%. The embedding model is a long-term commitment since changing means re-embedding everything, so I evaluate carefully before locking in."
+
+---
+
+## Q7: "When is it bad to use embedding models?"
+
+Embedding models are a poor choice in **six specific situations**. This question separates experienced practitioners from tool enthusiasts.
+
+### 1. You need exact matching
+
+```
+Query: "Show me shipment PEN-2026-001"
+
+Embedding search: Returns PEN-2026-002, PEN-2025-999 (similar vectors, WRONG shipments)
+Better: SELECT * FROM shipments WHERE shipment_id = 'PEN-2026-001'
+```
+
+> Embeddings capture **meaning**, not **identity**. IDs, codes, and precise strings need keyword or SQL — not vectors.
+
+### 2. The data is extremely short (1-3 words)
+
+```
+Query: "LTL"
+
+Embedding: Maps to a generic vector → matches "trucking," "freight," "shipping" vaguely
+Better: Keyword search + domain dictionary (LTL = "Less Than Truckload")
+```
+
+> Short text doesn't have enough signal. There's not enough context for embeddings to capture specific meaning.
+
+### 3. The domain is highly symbolic
+
+- **Math formulas** — embeddings don't understand `∫ x² dx`
+- **Chemical formulas** — `C₆H₁₂O₆` embeds as gibberish
+- **Programming syntax** — `SELECT * FROM` needs code-specific models
+- **Financial tickers** — `PNSK` and `PNSL` embed almost identically but are different companies
+
+### 4. The task requires reasoning, not similarity
+
+Embeddings capture **semantic proximity**, not **logical inference**.
+
+```
+Query: "Which route has delays greater than the fleet average?"
+
+Embedding search: Finds docs about "delays" and "fleet average" — but can't COMPUTE the comparison.
+Better: SQL query that calculates the average, then filters.
+```
+
+### 5. You need deterministic, reproducible results
+
+```
+Scenario: Compliance audit — "show me every mention of DOT regulation 49-CFR-395"
+
+Embedding search: May miss mentions, may include false positives. Results change with model updates.
+Better: BM25 / Elasticsearch — guaranteed to find every exact mention.
+```
+
+> When **every match matters** and you can't afford false negatives, keyword search is safer.
+
+### 6. The domain is out-of-distribution or cost can't be justified
+
+- If embeddings weren't trained on similar data, retrieval quality collapses — a general model won't embed obscure logistics jargon well
+- For a simple 20-question FAQ, an embedding pipeline ($50+/month) is overkill — use keyword matching ($0)
+
+> Don't build a rocket ship to cross the street.
+
+### The right mental model
+
+```
+Is the query STRUCTURED (filters, ranges)?  → SQL
+Is it EXACT MATCH (IDs, codes)?             → Keyword / BM25
+Is it SEMANTIC / NATURAL LANGUAGE?          → Embeddings
+Is it BOTH?                                 → Hybrid search (BM25 + Vector)
+```
+
+**Interview answer:**
+> "Embeddings are powerful for semantic understanding, but I always ask: 'Is this actually a semantic problem?' If a dispatcher searches for shipment PEN-2026-001, that's an exact-match lookup — embeddings add latency and might return the wrong shipment. If they ask 'what's the process for handling damaged goods?' — that's semantic, embeddings are perfect. In production I use hybrid search: BM25 catches exact matches, vector catches semantic intent, and combined results give best of both worlds. I also know when to skip embeddings entirely — structured queries go straight to SQL."
 
 ---
 
