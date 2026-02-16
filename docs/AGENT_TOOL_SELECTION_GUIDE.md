@@ -487,17 +487,88 @@ result = executor.invoke({"input": "What is our PTO policy?"})
 ## 2.2 LangGraph — The Workflow Powerhouse
 
 ### What It Is
+
 LangGraph (built on top of LangChain) lets you define agent behavior as a **graph** — nodes are actions, edges are decisions. Think of it as a visual flowchart that your agent follows.
 
+**The core idea:** In LangChain, the framework controls the agent loop ("call tools until done"). In LangGraph, **you** control every transition. You decide what happens after each step, when to loop, when to branch, and when to stop.
+
+```
+LangChain agent:  START → [LLM decides what to do] → ... → [LLM decides it's done] → END
+                  (framework controls the loop — you trust the LLM to stop)
+
+LangGraph agent:  START → Node A → [YOUR condition] → Node B or Node C → [YOUR condition] → END
+                  (you control every transition — deterministic where it matters)
+```
+
+**Why this matters:** In production, you can't let the LLM decide everything. Some transitions must be deterministic — "after the user approves, ALWAYS send the notification" or "if the shipment is hazmat, ALWAYS check DOT compliance." LangGraph gives you that control while still using LLMs for the reasoning parts.
+
+### Core Concepts — The 5 Building Blocks
+
+| Concept | What It Is | Analogy |
+|---------|-----------|---------|
+| **State** | A TypedDict that flows through the graph — every node reads and writes to it | The clipboard a worker carries between stations |
+| **Nodes** | Functions that do work (call LLM, query DB, send email) | Stations on an assembly line |
+| **Edges** | Connections between nodes — can be fixed or conditional | Conveyor belts between stations |
+| **Conditional Edges** | Routing logic — "if X, go to Node A; if Y, go to Node B" | A switch on the conveyor belt |
+| **Checkpoints** | Saved snapshots of state — pause, resume, time-travel, replay | Save points in a video game |
+
+```
+STATE (flows through everything):
+┌─────────────────────────────────────────────┐
+│ {                                           │
+│   "query": "Where is PEN-2026-001?",        │
+│   "shipment_data": {...},                    │
+│   "route_status": "delayed",                 │
+│   "notification_sent": false,                │
+│   "human_approved": false                    │
+│ }                                           │
+└─────────────────────────────────────────────┘
+        │
+        ▼
+┌──────────┐     ┌───────────┐     ┌──────────────┐
+│  Lookup  │────→│  Analyze  │────→│  Route       │
+│  Shipment│     │  Status   │     │  Decision    │
+│  (node)  │     │  (node)   │     │  (cond edge) │
+└──────────┘     └───────────┘     └──┬───────┬───┘
+                                      │       │
+                              delayed │       │ on_time
+                                      ▼       ▼
+                               ┌──────────┐  ┌──────┐
+                               │  Alert   │  │ END  │
+                               │  Dispatch│  └──────┘
+                               │  (node)  │
+                               └────┬─────┘
+                                    │
+                               ┌────▼─────┐
+                               │  Human   │  ← PAUSES here
+                               │  Approve │    until dispatcher
+                               │  (node)  │    clicks "approve"
+                               └────┬─────┘
+                                    │
+                               ┌────▼─────┐
+                               │  Send    │
+                               │  Slack   │
+                               └────┬─────┘
+                                    │
+                               ┌────▼─────┐
+                               │   END    │
+                               └──────────┘
+```
+
 ### When to Use It
-- Complex workflows with branching, loops, or retries
-- Human-in-the-loop approval steps
-- Multi-step processes that need checkpoints
-- When you need to pause, resume, or debug at any step
+
+- **Complex workflows with branching** — "if delayed, alert dispatch; if hazmat, check compliance; if both, do both then merge"
+- **Human-in-the-loop approval** — pause the graph, wait for a human to approve, then continue
+- **Multi-step processes that need checkpoints** — save state after each step so you can resume if something crashes
+- **Retry loops with exit conditions** — "keep researching until you have enough info, max 3 iterations"
+- **Multi-agent orchestration** — route between specialist agents (tracking agent, SOP agent, analytics agent)
+- **Workflows where order matters** — "ALWAYS check compliance BEFORE sending the shipment notification"
 
 ### When NOT to Use It
-- Simple Q&A or straightforward RAG (overkill)
-- Quick prototypes (higher learning curve)
+
+- **Simple Q&A or straightforward RAG** — LangChain or direct API is simpler and faster
+- **Quick prototypes** — higher learning curve, more boilerplate
+- **Single-tool agents** — if the agent just calls one tool and returns, a graph is overkill
 
 ### Architecture
 ```
@@ -535,53 +606,287 @@ LangGraph (built on top of LangChain) lets you define agent behavior as a **grap
 └──────────────────────────────────────────────────┘
 ```
 
-### Code Pattern: Approval Workflow with LangGraph
+### Where LangGraph Fits in This Project (Penske Logistics)
+
+LangGraph is the right choice for **4 specific workflows** in this project:
+
+**1. Shipment Exception Handling (the primary use case)**
+
+A dispatcher reports a problem. The agent must investigate, decide severity, notify the right people, and potentially reroute — all with human approval gates.
+
+```
+┌─────────┐    ┌──────────┐    ┌───────────┐    ┌──────────────┐
+│ Receive │───→│ Classify │───→│ Severity  │───→│ Route to     │
+│ Alert   │    │ Exception│    │ Check     │    │ Specialist   │
+└─────────┘    └──────────┘    └─────┬─────┘    └──────┬───────┘
+                                     │                  │
+                          ┌──────────┼──────────┐       │
+                          │          │          │       │
+                       LOW│      MED │      HIGH│       │
+                          ▼          ▼          ▼       │
+                    ┌─────────┐ ┌────────┐ ┌────────┐   │
+                    │ Log &   │ │ Alert  │ │ Alert  │   │
+                    │ Monitor │ │ Ops    │ │ Ops +  │   │
+                    └────┬────┘ └───┬────┘ │ Mgmt + │   │
+                         │          │      │ Reroute│   │
+                         │          │      └───┬────┘   │
+                         │          │          │        │
+                         │     ┌────▼────┐     │        │
+                         │     │ Human   │◄────┘        │
+                         │     │ Approve │              │
+                         │     └────┬────┘              │
+                         │          │                    │
+                         └────┬─────┘                    │
+                              ▼                          │
+                         ┌─────────┐                     │
+                         │ Execute │◄────────────────────┘
+                         │ Actions │
+                         └────┬────┘
+                              ▼
+                         ┌─────────┐
+                         │  END    │
+                         └─────────┘
+```
+
 ```python
 from langgraph.graph import StateGraph, END
-from typing import TypedDict, Literal
+from typing import TypedDict, Literal, Optional
+from datetime import datetime
 
-# Define state — what data flows through the graph
-class AgentState(TypedDict):
-    task: str
-    research: str
-    draft: str
-    approved: bool
+# --- State: everything the workflow needs to know ---
+class ShipmentExceptionState(TypedDict):
+    shipment_id: str
+    exception_type: str          # "delay", "damage", "missing", "hazmat_violation"
+    severity: str                # "low", "medium", "high"
+    shipment_data: dict          # From Snowflake lookup
+    root_cause: str              # LLM analysis
+    recommended_actions: list    # What the agent thinks should happen
+    human_approved: bool         # Dispatcher approval
+    notifications_sent: list     # Audit trail
+    timestamp: str
 
-# Define nodes — each node is a function
-def research_node(state: AgentState) -> AgentState:
-    # Call LLM to research the topic
-    result = llm.invoke(f"Research: {state['task']}")
-    return {"research": result.content}
+# --- Nodes: each step in the workflow ---
+def classify_exception(state: ShipmentExceptionState) -> dict:
+    """LLM classifies the exception type and severity."""
+    prompt = f"""Classify this shipment exception:
+    Shipment: {state['shipment_id']}
+    Data: {state['shipment_data']}
+    
+    Return: exception_type (delay|damage|missing|hazmat_violation)
+            severity (low|medium|high)
+            root_cause (brief explanation)"""
+    
+    result = llm.invoke(prompt)
+    # Parse LLM response into structured fields
+    return {
+        "exception_type": parsed.exception_type,
+        "severity": parsed.severity,
+        "root_cause": parsed.root_cause,
+    }
 
-def write_node(state: AgentState) -> AgentState:
-    # Call LLM to write based on research
-    result = llm.invoke(f"Write report using: {state['research']}")
-    return {"draft": result.content}
+def lookup_shipment(state: ShipmentExceptionState) -> dict:
+    """Query Snowflake for shipment details."""
+    data = snowflake_client.query(
+        f"SELECT * FROM shipments WHERE id = '{state['shipment_id']}'"
+    )
+    return {"shipment_data": data, "timestamp": datetime.now().isoformat()}
 
-def review_node(state: AgentState) -> AgentState:
-    # Human reviews the draft (pauses here)
-    return {"approved": True}  # Set by human input
+def recommend_actions(state: ShipmentExceptionState) -> dict:
+    """LLM recommends actions based on severity and exception type."""
+    prompt = f"""Given:
+    - Exception: {state['exception_type']} (severity: {state['severity']})
+    - Root cause: {state['root_cause']}
+    - Shipment: {state['shipment_data']}
+    
+    Recommend specific actions for the dispatch team."""
+    
+    result = llm.invoke(prompt)
+    return {"recommended_actions": parse_actions(result.content)}
 
-# Define routing — which node comes next?
-def should_continue(state: AgentState) -> Literal["write", "research"]:
-    if len(state.get("research", "")) > 500:
-        return "write"
-    return "research"
+def human_approval(state: ShipmentExceptionState) -> dict:
+    """PAUSE — wait for dispatcher to approve recommended actions."""
+    # LangGraph checkpoints here. The graph stops.
+    # When the dispatcher approves via UI, the graph resumes.
+    return {"human_approved": True}
 
-# Build graph
-graph = StateGraph(AgentState)
-graph.add_node("research", research_node)
-graph.add_node("write", write_node)
-graph.add_node("review", review_node)
+def execute_notifications(state: ShipmentExceptionState) -> dict:
+    """Send notifications based on severity."""
+    sent = []
+    if state["severity"] == "high":
+        slack_result = notify_slack("#dispatch-alerts", state)
+        email_result = notify_email("ops-manager@penske.com", state)
+        sent.extend(["slack", "email_ops_manager"])
+    elif state["severity"] == "medium":
+        slack_result = notify_slack("#dispatch-alerts", state)
+        sent.append("slack")
+    else:
+        log_exception(state)  # Just log, no notification
+        sent.append("logged")
+    return {"notifications_sent": sent}
 
-graph.set_entry_point("research")
-graph.add_conditional_edges("research", should_continue)
-graph.add_edge("write", "review")
-graph.add_edge("review", END)
+# --- Routing: deterministic decisions ---
+def route_by_severity(state: ShipmentExceptionState) -> Literal["recommend", "log_only"]:
+    """Low severity → just log. Medium/High → recommend actions."""
+    if state["severity"] == "low":
+        return "log_only"
+    return "recommend"
 
-app = graph.compile()
-result = app.invoke({"task": "Analyze Q4 sales performance"})
+def needs_approval(state: ShipmentExceptionState) -> Literal["approve", "execute"]:
+    """High severity → require human approval. Medium → auto-execute."""
+    if state["severity"] == "high":
+        return "approve"
+    return "execute"
+
+# --- Build the graph ---
+graph = StateGraph(ShipmentExceptionState)
+
+graph.add_node("lookup", lookup_shipment)
+graph.add_node("classify", classify_exception)
+graph.add_node("recommend", recommend_actions)
+graph.add_node("approve", human_approval)
+graph.add_node("execute", execute_notifications)
+graph.add_node("log_only", lambda s: {"notifications_sent": ["logged"]})
+
+graph.set_entry_point("lookup")
+graph.add_edge("lookup", "classify")
+graph.add_conditional_edges("classify", route_by_severity)
+graph.add_conditional_edges("recommend", needs_approval)
+graph.add_edge("approve", "execute")
+graph.add_edge("execute", END)
+graph.add_edge("log_only", END)
+
+# Compile with checkpointing (enables pause/resume)
+from langgraph.checkpoint.sqlite import SqliteSaver
+checkpointer = SqliteSaver.from_conn_string("checkpoints.db")
+app = graph.compile(checkpointer=checkpointer)
+
+# Run it
+result = app.invoke(
+    {"shipment_id": "PEN-2026-001", "human_approved": False},
+    config={"configurable": {"thread_id": "exception-001"}}
+)
 ```
+
+**Why LangGraph here and not LangChain:** The severity-based routing (`low → log`, `medium → auto-notify`, `high → human approval → then notify`) is a **deterministic business rule**, not something the LLM should decide. LangGraph lets you hardcode that logic while still using the LLM for classification and recommendations.
+
+**2. Weekly KPI Report Generation (Plan-and-Execute)**
+
+```
+┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+│ Pull     │──→│ Pull     │──→│ Analyze  │──→│ Generate │──→│ Human    │
+│ Shipment │   │ Cost     │   │ Trends   │   │ Report   │   │ Review   │
+│ Data     │   │ Data     │   │ (LLM)    │   │ (LLM)    │   │          │
+└──────────┘   └──────────┘   └──────────┘   └──────────┘   └────┬─────┘
+                                                                  │
+                                                          ┌───────▼───────┐
+                                                          │ Distribute    │
+                                                          │ (email/Slack) │
+                                                          └───────────────┘
+```
+
+**Why LangGraph:** Each data pull might fail (Snowflake timeout, API error). LangGraph checkpoints after each successful step, so if step 3 fails, you resume from step 3 — not from scratch. The human review gate ensures no report goes out without a manager's eyes on it.
+
+**3. Multi-Agent Dispatcher Assistant (Router Pattern)**
+
+```
+                    ┌──────────────┐
+                    │   Router     │
+                    │   (LLM)     │
+                    └──┬───┬───┬──┘
+                       │   │   │
+            ┌──────────┘   │   └──────────┐
+            ▼              ▼              ▼
+     ┌────────────┐ ┌────────────┐ ┌────────────┐
+     │ Tracking   │ │ SOP/Policy │ │ Analytics  │
+     │ Agent      │ │ Agent      │ │ Agent      │
+     │ (Snowflake │ │ (RAG over  │ │ (SQL +     │
+     │  + GPS)    │ │  docs)     │ │  charts)   │
+     └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
+           │              │              │
+           └──────────────┼──────────────┘
+                          ▼
+                   ┌────────────┐
+                   │  Synthesize│
+                   │  Response  │
+                   └────────────┘
+```
+
+```python
+# Router node — classifies the query and routes to the right specialist
+def router_node(state: DispatcherState) -> dict:
+    prompt = f"""Classify this dispatcher query:
+    "{state['query']}"
+    
+    Categories:
+    - tracking: shipment location, ETA, status
+    - sop: policy questions, procedures, compliance
+    - analytics: trends, KPIs, performance metrics
+    
+    Return the category."""
+    
+    category = llm.invoke(prompt).content.strip().lower()
+    return {"route": category}
+
+def route_to_agent(state: DispatcherState) -> Literal["tracking", "sop", "analytics"]:
+    return state["route"]
+
+graph = StateGraph(DispatcherState)
+graph.add_node("router", router_node)
+graph.add_node("tracking", tracking_agent_node)
+graph.add_node("sop", sop_rag_agent_node)
+graph.add_node("analytics", analytics_agent_node)
+graph.add_node("synthesize", synthesize_response_node)
+
+graph.set_entry_point("router")
+graph.add_conditional_edges("router", route_to_agent)
+graph.add_edge("tracking", "synthesize")
+graph.add_edge("sop", "synthesize")
+graph.add_edge("analytics", "synthesize")
+graph.add_edge("synthesize", END)
+```
+
+**Why LangGraph:** Each specialist agent has different tools (Snowflake, vector search, chart generation). The router ensures the right agent handles the right query. If you need to add a new specialist (e.g., "billing agent"), you just add a node and an edge — no restructuring.
+
+**4. DOT Compliance Checker (Loop with Exit Condition)**
+
+```
+┌──────────┐   ┌──────────┐   ┌──────────┐
+│ Extract  │──→│ Check    │──→│ All      │──yes──→ ✅ PASS
+│ Shipment │   │ Rule #N  │   │ Rules    │
+│ Details  │   │ (LLM)    │   │ Checked? │
+└──────────┘   └──────────┘   └─────┬────┘
+                    ▲               │ no
+                    │               │
+                    └───────────────┘
+                    (loop back, check next rule)
+                    
+                    If ANY rule fails → ❌ FAIL → Alert + Block Shipment
+```
+
+**Why LangGraph:** The compliance check loops through N rules. LangChain's agent loop would let the LLM decide when to stop — dangerous for compliance. LangGraph ensures **every rule is checked** deterministically, and the loop only exits when all rules pass or one fails.
+
+### LangGraph Features That Matter in Production
+
+| Feature | What It Does | Why It Matters |
+|---------|-------------|----------------|
+| **Checkpointing** | Saves state after every node | Crash recovery — resume from last successful step, not from scratch |
+| **Human-in-the-loop** | Pauses graph, waits for human input | Approval gates for high-severity actions (rerouting, cost changes) |
+| **Streaming** | Streams output from each node as it runs | Dispatcher sees progress: "Looking up shipment... Analyzing delay... Generating report..." |
+| **Time-travel** | Replay from any checkpoint | Debugging — "what did the agent see at step 3 that made it choose this path?" |
+| **Subgraphs** | Nest graphs inside graphs | Modular — the "compliance checker" is a subgraph reused in multiple workflows |
+| **Persistence** | Save to SQLite, PostgreSQL, Redis | Cross-session memory — dispatcher comes back tomorrow, picks up where they left off |
+
+### LangGraph vs Alternatives — When to Pick What
+
+| Scenario | Best Choice | Why NOT LangGraph |
+|----------|------------|-------------------|
+| Simple chatbot with tools | **LangChain** | Graph is overkill — agent loop is fine |
+| Single RAG query | **LlamaIndex** | No branching needed, just retrieve + generate |
+| Multi-step with branching + approval | **LangGraph** ✅ | This is exactly what it's built for |
+| Multiple agents collaborating | **LangGraph** ✅ or **CrewAI** | LangGraph for control, CrewAI for simplicity |
+| Enterprise .NET stack | **Semantic Kernel** | LangGraph is Python-only |
+| Quick prototype / demo | **OpenAI Assistants** | Zero infrastructure, fastest to ship |
+| Batch processing 10K docs | **Custom Python** | No graph needed — just a for loop |
 
 ### Key Difference from LangChain
 
@@ -591,6 +896,22 @@ result = app.invoke({"task": "Analyze Q4 sales performance"})
 | Implicit flow (framework decides) | Explicit flow (you define every path) |
 | Good for: "call tools until done" | Good for: "do A, then if X do B, else do C" |
 | Memory is add-on | State is first-class |
+| Hard to debug mid-execution | Checkpoint + time-travel for full visibility |
+| Agent decides when to stop | You define exit conditions explicitly |
+
+### Common Mistakes with LangGraph
+
+| Mistake | Why It's Wrong | What to Do Instead |
+|---------|---------------|-------------------|
+| Using LangGraph for simple Q&A | Adds complexity with no benefit | Use LangChain or direct API |
+| Putting ALL logic in LLM nodes | Defeats the purpose — you lose determinism | Use conditional edges for business rules, LLM nodes for reasoning |
+| No checkpointing in production | One crash = restart entire workflow | Always compile with a checkpointer |
+| Giant monolithic graph | Hard to test, debug, and maintain | Break into subgraphs (compliance subgraph, notification subgraph) |
+| Forgetting error handling in nodes | One node failure kills the whole graph | Wrap each node in try/except, use the SessionManager for retries |
+
+### Interview-Ready Summary
+
+> "I use LangGraph when the workflow has **branching logic, approval gates, or loops with exit conditions** — things that shouldn't be left to the LLM to decide. At Penske, the shipment exception handler is a perfect example: the LLM classifies the exception and recommends actions, but the severity-based routing (low → log, medium → auto-notify, high → human approval) is a deterministic business rule encoded as conditional edges. LangGraph also gives me checkpointing — if the notification step fails, I resume from there instead of re-running the entire workflow. For simple RAG or Q&A, I stick with LangChain. The rule of thumb: if you can draw the workflow as a flowchart with decision diamonds, use LangGraph. If it's just 'call tools until done,' use LangChain."
 
 ---
 

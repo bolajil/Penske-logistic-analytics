@@ -900,6 +900,308 @@ Return the raw data in a structured format:
 
 ---
 
+## "How do you handle session timeouts in production AI systems?"
+
+Session timeouts are critical in production — a hung API call can block a dispatcher for 30+ seconds, and cascading timeouts can take down the entire system.
+
+**The five layers of timeout protection:**
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  LAYER 5: SESSION LIFECYCLE                              │
+│  30-min idle timeout, 8-hour max lifetime                │
+│  Dispatcher walks away → session expires → context saved │
+├──────────────────────────────────────────────────────────┤
+│  LAYER 4: CIRCUIT BREAKER                                │
+│  5 failures in 60s → stop calling that service           │
+│  Azure OpenAI down? Stop hammering it, use fallback      │
+├──────────────────────────────────────────────────────────┤
+│  LAYER 3: MODEL FALLBACK CHAIN                           │
+│  GPT-4 → GPT-3.5-turbo → cached response → error msg    │
+│  Always return SOMETHING to the user                     │
+├──────────────────────────────────────────────────────────┤
+│  LAYER 2: EXPONENTIAL BACKOFF + JITTER                   │
+│  Retry 1: wait 2s, Retry 2: wait 4s, Retry 3: wait 8s  │
+│  Jitter prevents thundering herd (all clients retry at   │
+│  the same time)                                          │
+├──────────────────────────────────────────────────────────┤
+│  LAYER 1: PER-CALL TIMEOUT                               │
+│  LLM: 30s, Embedding: 15s, Search: 10s, DB: 15s         │
+│  Never wait forever — every call has a deadline           │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Timeout configuration by service type:**
+
+| Service | Timeout | Max Retries | Backoff | Why |
+|---------|---------|-------------|---------|-----|
+| **LLM (GPT-4)** | 30s | 3 | 2s → 4s → 8s | LLM calls are slow, especially complex reasoning |
+| **Embeddings** | 15s | 3 | 1s → 2s → 4s | Faster than LLM but can spike under load |
+| **Search (BM25 + Vector)** | 10s | 2 | 0.5s → 1s | Search must be fast or UX suffers |
+| **Database (Snowflake)** | 15s | 2 | 1s → 2s | Complex queries can be slow, simple ones are fast |
+| **Agent tool calls** | 10s | 2 | 1s → 2s | Each tool in the agent loop has its own timeout |
+
+**Circuit breaker — the key pattern most people miss:**
+
+```
+Normal operation (CLOSED):
+  Request → Service → Response ✓
+  Request → Service → Response ✓
+  Request → Service → TIMEOUT ✗  (failure 1)
+  Request → Service → TIMEOUT ✗  (failure 2)
+  Request → Service → ERROR ✗    (failure 3)
+  Request → Service → TIMEOUT ✗  (failure 4)
+  Request → Service → ERROR ✗    (failure 5 — threshold hit!)
+
+Circuit OPENS:
+  Request → REJECTED immediately (no waiting 30s for timeout)
+  Request → REJECTED immediately
+  ... for 30 seconds ...
+
+Circuit HALF-OPEN (test recovery):
+  Request → Service → Response ✓  → Circuit CLOSES, back to normal
+  OR
+  Request → Service → TIMEOUT ✗   → Circuit stays OPEN another 30s
+```
+
+**Without circuit breaker:** 100 dispatchers all waiting 30s for a dead service = 100 × 30s = 50 minutes of wasted time.
+**With circuit breaker:** First 5 requests detect the failure, then all subsequent requests fail fast in <1ms and use the fallback chain.
+
+**Session lifecycle — Penske dispatcher example:**
+
+```
+09:00 — Dispatcher logs in → Session created (ID: abc-123)
+         idle_timeout: 30 min, max_lifetime: 8 hours
+
+09:05 — "Where is PEN-2026-001?" → Session refreshed, timer reset
+09:12 — "Show me Zone 5 delays" → Session refreshed, timer reset
+09:45 — (no activity for 33 minutes)
+         → Session EXPIRED automatically
+         → Context saved: 2 interactions, 1,200 tokens used
+         → Resources released
+
+09:50 — Dispatcher comes back → New session created (ID: def-456)
+         → Previous session summary available if needed
+
+17:00 — 8-hour max lifetime reached → Session force-expired
+         → Prevents memory leaks from forgotten sessions
+```
+
+**Implementation — this project's `session_manager.py`:**
+
+```python
+from session_manager import SessionManager, ServiceType, TimeoutConfig
+
+# Initialize with production defaults
+manager = SessionManager(
+    session_idle_timeout_minutes=30,
+    session_max_lifetime_hours=8,
+)
+
+# Create a session for a dispatcher
+session = manager.create_session(user_id="dispatcher_42")
+
+# Make an LLM call with full protection:
+# - 30s timeout per attempt
+# - 3 retries with exponential backoff
+# - Circuit breaker (5 failures → stop calling)
+# - Model fallback: GPT-4 → GPT-3.5 → cached → error message
+result = manager.call_llm_with_fallback(
+    client=openai_client,
+    messages=[{"role": "user", "content": "Where is PEN-2026-001?"}],
+    primary_model="gpt-4",
+    fallback_models=["gpt-3.5-turbo"],
+    cached_response="Please try again shortly.",
+    session_id=session.session_id,
+)
+
+print(result["content"])      # The answer
+print(result["model_used"])   # "gpt-4", "gpt-3.5-turbo", "cache", or "error"
+print(result["tokens_used"])  # Token count for cost tracking
+
+# Monitor system health
+print(manager.get_circuit_status())  # All circuit breaker states
+print(manager.get_stats())           # Active sessions, configs, events
+```
+
+**What to say in the interview:**
+> "I implement five layers of timeout protection: per-call timeouts (30s for LLM, 10s for search), exponential backoff with jitter to prevent thundering herd, circuit breakers that stop hammering dead services after 5 failures, model fallback chains (GPT-4 → GPT-3.5 → cache), and session lifecycle management with idle timeouts. The key insight is that a circuit breaker saves you from cascading failures — instead of 100 dispatchers waiting 30 seconds each for a dead service, they get an instant fallback response. I built this as a reusable `SessionManager` class that any service in the pipeline can use."
+
+---
+
+## "What happens when an agent's external tool call fails — like Slack, email, or Jira?"
+
+This is different from LLM failures. When the **LLM** fails, you swap models (GPT-4 → GPT-3.5). When an **external tool** fails, you swap **channels** — because the action still needs to happen.
+
+**The key difference:**
+
+```
+LLM FAILURE:                          TOOL FAILURE:
+  GPT-4 down?                          Slack API down?
+  → Swap MODEL: use GPT-3.5            → Swap CHANNEL: use email
+  → Same question, different brain      → Same message, different delivery
+
+  The user doesn't care WHICH model     The dispatcher doesn't care HOW they
+  answered — they care about quality.    get notified — they care that they DO.
+```
+
+**Real scenario — Penske agent notifying about a delayed shipment:**
+
+```
+Agent decides: "I need to alert the dispatcher about PEN-2026-001 delay"
+
+Step 1: Try Slack API
+  → POST /api/chat.postMessage to #dispatch-alerts
+  → TIMEOUT after 10s (Slack is rate-limited)
+  → Retry 1: wait 1s → TIMEOUT
+  → Retry 2: wait 2s → 429 Too Many Requests
+  → Circuit breaker: 3 failures → OPEN for Slack
+
+Step 2: Fallback to Email (channel swap)
+  → Send via SMTP to dispatch@penske.com
+  → Subject: "⚠️ Shipment Delay: PEN-2026-001"
+  → Body: "PEN-2026-001 delayed 90min on I-35 due to ice storm. 
+           Recommend reroute via I-40."
+  → SUCCESS ✓
+
+Step 3: Agent continues with confirmation
+  → "I've notified the dispatch team via email (Slack was temporarily 
+     unavailable). Shipment PEN-2026-001 delay alert sent."
+```
+
+**What if ALL channels fail?**
+
+```
+Slack  → TIMEOUT ✗
+Email  → SMTP error ✗
+Teams  → 503 Service Unavailable ✗
+
+→ ACTION QUEUED for async retry
+  {
+    "tool": "slack",
+    "message": "PEN-2026-001 delayed 90min",
+    "channel": "#dispatch-alerts",
+    "queued_at": "2026-02-14T19:30:00",
+    "retry_after": "2026-02-14T19:35:00",
+    "fallbacks_tried": ["email", "teams"]
+  }
+
+→ Agent tells user:
+  "I couldn't send the notification right now — Slack, email, and Teams 
+   are all experiencing issues. The alert has been queued and will be 
+   sent automatically when services recover. I'll also log this in the 
+   incident tracker."
+```
+
+**The tool fallback pattern:**
+
+| Failure Type | What Happens | Fallback Strategy |
+|-------------|-------------|-------------------|
+| **Slack rate-limited (429)** | Too many messages/sec | Exponential backoff → email → queue |
+| **Slack down (500/503)** | Service outage | Circuit breaker opens → email → Teams |
+| **Email SMTP timeout** | Mail server slow | Retry 2x → Teams → queue |
+| **Jira API auth expired** | Token expired | Refresh token → retry → queue + alert ops |
+| **Database connection lost** | Snowflake maintenance | Retry with backoff → cached data → inform user |
+| **All channels down** | Major outage | Queue action → alert ops team → inform user |
+
+**Each external tool gets its own circuit breaker:**
+
+```
+Circuit Breakers (independent):
+  tool_slack:     OPEN   (rate-limited, recovering in 25s)
+  tool_email:     CLOSED (healthy)
+  tool_teams:     CLOSED (healthy)
+  tool_jira:      CLOSED (healthy)
+  tool_snowflake: CLOSED (healthy)
+  llm_gpt4:      CLOSED (healthy)
+  llm_gpt35:     CLOSED (healthy)
+
+→ When Slack circuit is OPEN, requests skip Slack instantly (<1ms)
+  and go straight to email. No wasted time waiting for Slack to timeout.
+```
+
+**Implementation — using `call_tool_with_fallback`:**
+
+```python
+from session_manager import SessionManager
+
+manager = SessionManager()
+session = manager.create_session(user_id="dispatcher_42")
+
+# Agent needs to send a delay alert
+result = manager.call_tool_with_fallback(
+    tool_name="slack",
+    primary_func=slack_client.send_message,
+    args=("#dispatch-alerts", "PEN-2026-001 delayed 90min on I-35"),
+    fallback_funcs=[
+        {
+            "name": "email",
+            "func": send_email,
+            "args": (
+                "dispatch@penske.com",
+                "⚠️ Shipment Delay: PEN-2026-001",
+                "PEN-2026-001 delayed 90min on I-35. Recommend reroute via I-40."
+            ),
+        },
+        {
+            "name": "teams",
+            "func": teams_client.send,
+            "args": ("dispatch-channel", "PEN-2026-001 delayed 90min"),
+        },
+    ],
+    session_id=session.session_id,
+    queue_on_failure=True,  # Queue if ALL channels fail
+)
+
+if result["success"]:
+    print(f"Alert sent via {result['tool_used']}")
+elif result["queued"]:
+    print("All channels down — alert queued for retry")
+else:
+    print("Failed to send alert — manual intervention needed")
+
+# Check which tools are healthy
+print(manager.get_circuit_status())
+# {
+#   "tool_slack": {"state": "open", "failure_count": 3},
+#   "tool_email": {"state": "closed", "failure_count": 0},
+#   "tool_teams": {"state": "closed", "failure_count": 0},
+# }
+```
+
+**How the agent should handle tool failures in its reasoning loop:**
+
+```
+Agent ReAct loop:
+
+THINK: "I need to notify dispatch about PEN-2026-001 delay"
+ACT:   call notify_dispatch(channel="slack", message="...")
+OBSERVE: {"success": false, "tool_used": "email", "queued": false}
+
+THINK: "Slack was down but email worked. I should tell the user 
+        which channel was used so they know where to look."
+RESPOND: "I've sent the delay alert for PEN-2026-001 to the dispatch 
+          team via email (Slack was temporarily unavailable). The team 
+          should check their inbox for details."
+
+--- OR if everything fails: ---
+
+OBSERVE: {"success": false, "tool_used": "queued", "queued": true}
+
+THINK: "All notification channels are down. The action is queued.
+        I should be transparent with the user."
+RESPOND: "I wasn't able to send the notification right now — all 
+          channels (Slack, email, Teams) are experiencing issues. 
+          The alert has been queued and will send automatically 
+          when services recover. Would you like me to try again 
+          in a few minutes?"
+```
+
+**What to say in the interview:**
+> "Tool failures are different from LLM failures — you swap channels, not models. If Slack is down, the dispatcher still needs to be notified, so the agent falls back to email, then Teams, then queues the action for async retry. Each tool gets its own circuit breaker so a Slack outage doesn't slow down email or database calls. The agent is also transparent — it tells the user which channel was used and whether the action was queued. The key principle is: the business action must happen, even if the preferred channel is unavailable."
+
+---
+
 ## "Can you solve this problem without an LLM or vector DB?"
 
 **This is a trap question. The right answer is: OFTEN, YES.**
@@ -1081,6 +1383,63 @@ STEP 5: VERIFY
 # 8. AI Engineer Deep Dive (REQ 20296-1)
 
 ## Q1: "Describe your experience with ontology frameworks. How have you used them in practice, and what are the key design and governance practices you follow?"
+
+### What is an ontology framework?
+
+An **ontology** is a formal, explicit representation of **concepts**, their **properties**, and the **relationships** between them within a specific domain. Think of it as a structured map of "what exists and how things connect" in your problem space.
+
+An **ontology framework** is the tooling, standards, and methodology you use to **define, store, query, and govern** that ontology.
+
+**Simple analogy:**
+- A **database schema** tells you what columns a table has.
+- An **ontology** tells you what those columns *mean*, how entities relate to each other, and what synonyms and rules apply across the entire domain.
+
+```
+DATABASE SCHEMA:                    ONTOLOGY:
+┌──────────────┐                    ┌──────────────┐
+│ shipments     │                    │ Shipment      │
+│  - id         │                    │  - is_a: LogisticsEvent
+│  - carrier_id │  ← just columns   │  - assigned_to → Driver
+│  - status     │                    │  - uses → Route
+│  - eta        │                    │  - synonyms: "load", "freight move"
+└──────────────┘                    │  - status ∈ {in_transit, delivered, delayed}
+                                    │  - related_to → Vehicle, Warehouse, Customer
+                                    └──────────────┘
+                                    
+Schema says: "there's a carrier_id column"
+Ontology says: "a Carrier is a company that transports Shipments,
+               also known as 'trucking company' or 'hauler',
+               and every Shipment must have exactly one Carrier"
+```
+
+**Why ontologies matter for AI/RAG systems:**
+
+| Without Ontology | With Ontology |
+|-----------------|---------------|
+| Search for "trucking company" misses docs about "carriers" | Synonyms mapped — both resolve to the same concept |
+| Agent doesn't know that a Driver operates a Vehicle on a Route | Agent can traverse relationships to answer complex questions |
+| Each team uses different field names for the same thing | Single source of truth for every term in the domain |
+| Embeddings treat "late delivery" and "delayed shipment" as different | Ontology tells the system they're semantically identical |
+| RAG retrieves irrelevant chunks because it only has text similarity | Ontology adds **structured reasoning** on top of vector search |
+
+**The three layers of an ontology:**
+
+```
+LAYER 1 — CONCEPTS (classes/entities):
+  Shipment, Driver, Vehicle, Route, Warehouse, Carrier, Customer
+
+LAYER 2 — PROPERTIES (attributes):
+  Shipment.status, Shipment.eta, Driver.license_type, Vehicle.capacity
+
+LAYER 3 — RELATIONSHIPS (how concepts connect):
+  Shipment ── assigned_to ──→ Driver
+  Driver   ── operates ─────→ Vehicle
+  Shipment ── uses ─────────→ Route
+  
+  + RULES: "Every Shipment must have exactly one Carrier"
+  + SYNONYMS: "carrier" = "trucking company" = "hauler"
+  + HIERARCHY: Vehicle > Truck > Refrigerated Truck
+```
 
 ### How I've used ontology frameworks
 
@@ -1396,10 +1755,53 @@ Naive PDF extraction (what most tools give you):
 | Tool | How It Works | Best For |
 |------|-------------|----------|
 | **Azure Document Intelligence** | AI-powered table detection, returns structured JSON | Production — best accuracy on complex tables |
+| **Amazon Textract** | AWS AI-powered OCR + table/form extraction, returns structured JSON | Production on AWS — tables, forms, invoices, receipts |
+| **Google Document AI** | GCP AI-powered document parsing with pre-trained processors | Production on GCP — invoices, contracts, lending docs |
 | **Camelot / Tabula** | Rule-based PDF table extraction | Simple, well-formatted tables |
 | **Unstructured.io** | Open-source, handles mixed content (text + tables + images) | General-purpose pipeline |
 | **PyMuPDF** | Fast, reliable text + layout extraction | Lightweight extraction needs |
 | **LlamaParse** | LLM-powered document parsing | Complex layouts, mixed formats |
+
+**Cloud provider comparison — document intelligence services:**
+
+| Feature | Azure Document Intelligence | Amazon Textract | Google Document AI |
+|---------|---------------------------|-----------------|-------------------|
+| **Table extraction** | ✅ Best-in-class, cell-level JSON | ✅ Strong, returns rows/columns/cells | ✅ Good, structured output |
+| **Form/key-value extraction** | ✅ Pre-built + custom models | ✅ AnalyzeDocument with Forms | ✅ Pre-trained form parsers |
+| **Handwriting (OCR)** | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Custom models** | ✅ Train on your own doc types | ⚠️ Limited (Queries feature) | ✅ Custom Document Extractor |
+| **Pre-built extractors** | Invoices, receipts, ID docs, W-2s | Invoices, ID docs, lending | Invoices, contracts, lending, W-2s |
+| **Output format** | JSON with bounding boxes + confidence | JSON with Block-level geometry | JSON with entities + confidence |
+| **Pricing (per page)** | ~$0.01–$0.10 | ~$0.015 (tables), ~$0.01 (text) | ~$0.01–$0.065 |
+| **Best for** | Azure-native shops, complex tables | AWS-native shops, forms-heavy | GCP-native shops, lending/contracts |
+
+**Penske example — choosing the right tool:**
+> "If Penske is on AWS, I'd use **Amazon Textract** with `AnalyzeDocument` (Tables feature) to extract route performance tables from PDF reports. Textract returns each cell with row/column indices, so I can reconstruct the table structure perfectly. If on Azure, I'd use **Document Intelligence** with the layout model. Both give you structured JSON — the key is that you never flatten the table into a text blob."
+
+```python
+# AWS Textract — extracting a table from a PDF
+import boto3
+
+textract = boto3.client('textract', region_name='us-east-1')
+
+response = textract.analyze_document(
+    Document={'Bytes': pdf_bytes},
+    FeatureTypes=['TABLES']  # Also supports 'FORMS', 'QUERIES'
+)
+
+# Textract returns Blocks: TABLE → TABLE_CELL with RowIndex, ColumnIndex
+for block in response['Blocks']:
+    if block['BlockType'] == 'TABLE':
+        print(f"Found table with {block.get('Relationships', [])}")
+    elif block['BlockType'] == 'CELL':
+        row = block['RowIndex']
+        col = block['ColumnIndex']
+        # Get cell text from child WORD blocks
+        text = get_cell_text(block, response['Blocks'])
+        print(f"  Cell[{row},{col}] = {text}")
+        # → Cell[1,1] = "Route", Cell[1,2] = "On-Time%", ...
+        # → Cell[2,1] = "CHI → DAL", Cell[2,2] = "92.1%", ...
+```
 
 **Step 2: Preserve structure as Markdown or key-value pairs**
 

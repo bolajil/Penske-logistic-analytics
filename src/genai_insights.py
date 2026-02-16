@@ -18,45 +18,79 @@ except ImportError:
     OPENAI_AVAILABLE = False
     logger.warning("OpenAI package not installed. GenAI features will use mock responses.")
 
+try:
+    from session_manager import SessionManager, ServiceType
+    SESSION_MANAGER_AVAILABLE = True
+except ImportError:
+    SESSION_MANAGER_AVAILABLE = False
+    logger.info("SessionManager not available. Running without timeout/retry/fallback.")
+
 
 class InsightGenerator:
     """Generate AI-powered insights for logistics operations"""
     
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, session_manager: SessionManager = None):
         """
         Initialize the insight generator
         
         Args:
             api_key: OpenAI API key. If not provided, uses OPENAI_API_KEY env var
+            session_manager: Optional SessionManager for timeout/retry/fallback
         """
         self.api_key = api_key or os.getenv('OPENAI_API_KEY')
         self.client = None
+        self.session_manager = session_manager
         
         if OPENAI_AVAILABLE and self.api_key:
             self.client = OpenAI(api_key=self.api_key)
             logger.info("OpenAI client initialized")
         else:
             logger.warning("Running in mock mode - no API calls will be made")
+        
+        if self.session_manager is None and SESSION_MANAGER_AVAILABLE:
+            self.session_manager = SessionManager()
+            logger.info("Default SessionManager initialized (30s timeout, 3 retries, model fallback)")
     
     def _call_llm(self, system_prompt: str, user_prompt: str, temperature: float = 0.7) -> str:
-        """Make LLM API call or return mock response"""
+        """Make LLM API call with timeout, retry, and model fallback.
         
-        if self.client:
-            try:
-                response = self.client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=temperature,
-                    max_tokens=1000
-                )
-                return response.choices[0].message.content
-            except Exception as e:
-                logger.error(f"LLM API error: {e}")
-                return self._mock_response(user_prompt)
-        else:
+        Fallback chain: GPT-4 → GPT-3.5-turbo → mock response
+        Each attempt has a 30s timeout with 3 retries and exponential backoff.
+        """
+        if not self.client:
+            return self._mock_response(user_prompt)
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        # Use SessionManager for timeout/retry/fallback if available
+        if self.session_manager:
+            result = self.session_manager.call_llm_with_fallback(
+                client=self.client,
+                messages=messages,
+                primary_model="gpt-4",
+                fallback_models=["gpt-3.5-turbo"],
+                cached_response=self._mock_response(user_prompt),
+                temperature=temperature,
+                max_tokens=1000,
+            )
+            if result["model_used"] != "gpt-4":
+                logger.warning(f"LLM fallback used: {result['model_used']}")
+            return result["content"]
+        
+        # Fallback: direct call without session management
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4",
+                messages=messages,
+                temperature=temperature,
+                max_tokens=1000
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"LLM API error: {e}")
             return self._mock_response(user_prompt)
     
     def _mock_response(self, prompt: str) -> str:
