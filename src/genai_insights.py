@@ -22,6 +22,7 @@ try:
     from session_manager import SessionManager, ServiceType
     SESSION_MANAGER_AVAILABLE = True
 except ImportError:
+    SessionManager = None  # For type hints when not available
     SESSION_MANAGER_AVAILABLE = False
     logger.info("SessionManager not available. Running without timeout/retry/fallback.")
 
@@ -29,7 +30,7 @@ except ImportError:
 class InsightGenerator:
     """Generate AI-powered insights for logistics operations"""
     
-    def __init__(self, api_key: str = None, session_manager: SessionManager = None):
+    def __init__(self, api_key: str = None, session_manager: "SessionManager" = None):
         """
         Initialize the insight generator
         
