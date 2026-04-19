@@ -1,0 +1,76 @@
+<mxfile host="65bd71144e">
+    <diagram id="futurex-arch" name="FuturEx AI Platform">
+        <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <!-- Main container -->
+                <mxCell id="2" value="FUTUREX AI PLATFORM" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1a1a2e;strokeColor=#16213e;fontColor=#eaeaea;fontSize=18;fontStyle=1;verticalAlign=top;spacingTop=10;" vertex="1" parent="1">
+                    <mxGeometry x="50" y="30" width="1000" height="780" as="geometry"/>
+                </mxCell>
+                <!-- Row 1: Agent Registry, Orchestration Engine, Control Plane -->
+                <mxCell id="3" value="Agent&#xa;Registry" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0f3460;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+                    <mxGeometry x="100" y="80" width="140" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="4" value="Orchestration&#xa;Engine" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e94560;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+                    <mxGeometry x="430" y="80" width="140" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="5" value="Control&#xa;Plane API" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0f3460;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+                    <mxGeometry x="760" y="80" width="140" height="70" as="geometry"/>
+                </mxCell>
+                <!-- Arrows Row 1 -->
+                <mxCell id="6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#00d9ff;strokeWidth=2;" edge="1" parent="1" source="4" target="3">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#00d9ff;strokeWidth=2;" edge="1" parent="1" source="4" target="5">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <!-- Row 2: Context Service, Connector Layer, Permissions -->
+                <mxCell id="8" value="Context&#xa;Service" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#533483;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+                    <mxGeometry x="100" y="200" width="140" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="9" value="Connector&#xa;Layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#533483;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+                    <mxGeometry x="430" y="200" width="140" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="10" value="Permissions&#xa;&amp; Auth" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#533483;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+                    <mxGeometry x="760" y="200" width="140" height="70" as="geometry"/>
+                </mxCell>
+                <!-- Vertical arrows -->
+                <mxCell id="11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#00d9ff;strokeWidth=2;" edge="1" parent="1" source="3" target="8">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#00d9ff;strokeWidth=2;" edge="1" parent="1" source="4" target="9">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#00d9ff;strokeWidth=2;" edge="1" parent="1" source="5" target="10">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <!-- Row 3: Vector Store and Tool Integrations -->
+                <mxCell id="14" value="Vector&#xa;Knowledge&#xa;Store" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#00b4d8;strokeColor=#1a1a2e;fontColor=#1a1a2e;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+                    <mxGeometry x="100" y="320" width="140" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="15" value="Tool Integrations&#xa;&#xa;Jira | Confluence | Git | Email&#xa;Slack | CRM | Docs | HSM APIs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#00b4d8;strokeColor=#1a1a2e;fontColor=#1a1a2e;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+                    <mxGeometry x="320" y="320" width="580" height="90" as="geometry"/>
+                </mxCell>
+                <!-- Vertical arrows to row 3 -->
+                <mxCell id="16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#00d9ff;strokeWidth=2;" edge="1" parent="1" source="8" target="14">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#00d9ff;strokeWidth=2;entryX=0.5;entryY=0;" edge="1" parent="1" source="9" target="15">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="18" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#00d9ff;strokeWidth=2;entryX=0.8;entryY=0;" edge="1" parent="1" source="10" target="15">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <!-- Observability -->
+                <mxCell id="19" value="Observability: Tracing | Audit Log | Metrics" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#48cae4;strokeColor=#1a1a2e;fontColor=#1a1a2e;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+                    <mxGeometry x="100" y="460" width="800" height="50" as="geometry"/>
+                </mxCell>
+                <!-- Sandbox -->
+                <mxCell id="20" value="Sandbox Environment (isolated eval runtime)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#90e0ef;strokeColor=#1a1a2e;fontColor=#1a1a2e;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+                    <mxGeometry x="100" y="540" width="800" height="50" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

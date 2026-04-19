@@ -28,6 +28,140 @@ A comprehensive ML-powered analytics solution for Penske Logistics to analyze se
 
 ---
 
+## System Design Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           CLIENT / PRESENTATION LAYER                        │
+│                                                                              │
+│   ┌────────────────┐   ┌────────────────┐   ┌────────────────┐              │
+│   │   Streamlit     │   │   Gradio App   │   │   React        │              │
+│   │   Dashboard     │   │   (Enhanced)   │   │   Frontend     │              │
+│   │   :8501         │   │                │   │                │              │
+│   └───────┬────────┘   └───────┬────────┘   └───────┬────────┘              │
+│           └────────────────────┴────────────────────┘                        │
+│                                │                                             │
+│   ┌────────────────────────────┴────────────────────────────┐                │
+│   │                FastAPI REST API (:8000)                   │                │
+│   │   /performance/summary    /predict/resources              │                │
+│   │   /performance/service    /predict/customers              │                │
+│   │   /insights/generate                                      │                │
+│   └────────────────────────────┬────────────────────────────┘                │
+│                                │                                             │
+├────────────────────────────────┼─────────────────────────────────────────────┤
+│                        INTELLIGENCE LAYER                                    │
+│                                │                                             │
+│   ┌──────────────┐   ┌────────┴───────┐   ┌──────────────┐                  │
+│   │  ML Models    │   │  RAG Engine    │   │  GenAI       │                  │
+│   │               │   │               │   │  Insights    │                  │
+│   │  • XGBoost    │   │  • LangChain  │   │               │                  │
+│   │    (MAPE 8.2%)│   │  • ChromaDB   │   │  • GPT-4     │                  │
+│   │  • Random     │   │  • FAISS      │   │  • Claude    │                  │
+│   │    Forest     │   │  • BM25       │   │  • Bedrock   │                  │
+│   │    (AUC 0.87) │   │               │   │  • Gemini    │                  │
+│   │  • LSTM       │   │  Hybrid Search│   │               │                  │
+│   │    (RMSE 12.4)│   │  BM25 (40%)   │   │  Natural     │                  │
+│   │  • K-Means    │   │  + Vector     │   │  language     │                  │
+│   │    (Sil. 0.72)│   │    (60%)      │   │  insights    │                  │
+│   └──────┬───────┘   └───────┬───────┘   └──────┬───────┘                  │
+│          └───────────────────┴───────────────────┘                           │
+│                              │                                               │
+├──────────────────────────────┼───────────────────────────────────────────────┤
+│                         DATA LAYER                                           │
+│                              │                                               │
+│   ┌──────────────┐   ┌──────┴───────┐   ┌──────────────┐                    │
+│   │  6 Datasets   │   │ Vector Store │   │  Session     │                    │
+│   │  (CSV/Parquet)│   │ (Embeddings) │   │  Manager     │                    │
+│   │               │   │              │   │              │                    │
+│   │  • Fleet Ops  │   │  • ChromaDB  │   │  • User      │                    │
+│   │  • Warehouse  │   │    (local)   │   │    state     │                    │
+│   │  • Customers  │   │  • FAISS     │   │  • Chat      │                    │
+│   │  • Maintenance│   │    (in-mem)  │   │    history   │                    │
+│   │  • Delivery   │   │  • Azure AI  │   │  • Multi-    │                    │
+│   │  • Regional   │   │    Search    │   │    turn ctx  │                    │
+│   └──────────────┘   └──────────────┘   └──────────────┘                    │
+│                                                                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                      CLOUD / DEPLOYMENT LAYER                                │
+│                                                                              │
+│   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌────────────┐  │
+│   │  Docker       │   │  AWS ECS     │   │  Azure       │   │  GCP Cloud │  │
+│   │  Compose      │   │  Fargate     │   │  Container   │   │  Run       │  │
+│   │  (local)      │   │  ~$50-100/mo │   │  Apps        │   │  ~$20-60/mo│  │
+│   │               │   │              │   │  ~$40-80/mo  │   │            │  │
+│   └──────────────┘   └──────────────┘   └──────────────┘   └────────────┘  │
+│                                                                              │
+│   Infrastructure as Code: CloudFormation │ ARM Templates │ Cloud Build       │
+│   CI/CD: CodeBuild │ Azure Pipelines │ Cloud Build │ Kubernetes              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow
+
+```
+Raw Data (6 CSVs)
+    │
+    ▼
+Data Prep & Feature Engineering (data_prep.py, custom_data_loader.py)
+    │
+    ├──▶ ML Pipeline ──────────────────────────────────────────┐
+    │    ├─ Service Performance Analysis (service_performance.py)│
+    │    ├─ Resource Prediction — XGBoost, LSTM                 │
+    │    └─ Customer Acquisition — Random Forest, K-Means       │
+    │                                                           │
+    ├──▶ RAG Pipeline ─────────────────────────────────────────┐│
+    │    ├─ Document Chunking (RecursiveCharacterTextSplitter)  ││
+    │    ├─ Embedding (OpenAI text-embedding-3-small)           ││
+    │    ├─ Vector Store (ChromaDB / FAISS)                     ││
+    │    └─ Hybrid Search (BM25 40% + Vector 60%)              ││
+    │                                                           ││
+    ├──▶ GenAI Insights ───────────────────────────────────────┐││
+    │    ├─ Operational recommendations                         │││
+    │    ├─ Anomaly explanations                                │││
+    │    └─ Natural language summaries                          │││
+    │                                                           │││
+    ▼                                                           │││
+FastAPI Endpoints ◀────────────────────────────────────────────┘│┘
+    │                                                            │
+    ▼                                                            │
+Streamlit Dashboard / Gradio App / React Frontend ◀─────────────┘
+```
+
+### Component Responsibilities
+
+| Layer | Component | Technology | Responsibility |
+|-------|-----------|------------|----------------|
+| **Client** | Streamlit Dashboard | Streamlit | KPI visualization, interactive backtests, heatmaps |
+| **Client** | Gradio App | Gradio | Enhanced ML model interaction UI |
+| **Client** | React Frontend | React | Production web interface |
+| **API** | REST API | FastAPI | 5 endpoint groups: performance, predict, insights, customers |
+| **ML** | Service Performance | Pandas, Scikit-learn | On-time delivery, fleet utilization, cost analysis |
+| **ML** | Resource Prediction | XGBoost, LSTM | Demand forecasting (MAPE 8.2%), capacity planning |
+| **ML** | Customer Acquisition | Random Forest, K-Means | Lead scoring (AUC 0.87), segmentation (Silhouette 0.72) |
+| **AI** | RAG Engine | LangChain, ChromaDB | Document retrieval, semantic search, context-aware Q&A |
+| **AI** | Hybrid Search | BM25 + FAISS | Keyword + semantic search fusion with tunable weights |
+| **AI** | GenAI Insights | GPT-4, Claude, Bedrock | Natural language operational recommendations |
+| **AI** | Cloud AI Services | AWS/Azure/GCP SDKs | Multi-cloud LLM abstraction layer |
+| **Data** | Session Manager | Custom Python | Multi-turn conversation state, user session tracking |
+| **Infra** | Docker | Docker Compose | Local development and testing |
+| **Infra** | AWS | ECS Fargate, CloudFormation | Enterprise cloud deployment |
+| **Infra** | Azure | Container Apps, ARM | Microsoft ecosystem deployment |
+| **Infra** | GCP | Cloud Run, Cloud Build | Pay-per-use serverless deployment |
+
+### Why This Architecture?
+
+| Decision | Choice | Alternative Considered | Rationale |
+|----------|--------|----------------------|-----------|
+| ML Framework | Scikit-learn + XGBoost | AutoML (H2O) | Full control over feature engineering and model tuning |
+| RAG Framework | LangChain + ChromaDB | LlamaIndex | Better ecosystem for hybrid search and multi-provider support |
+| Search Strategy | BM25 + Vector Hybrid | Vector-only | Exact ID lookups (e.g., "PEN-2026-001") fail with vector-only |
+| API Framework | FastAPI | Flask, Django | Async support, auto-docs, type validation, high performance |
+| Dashboard | Streamlit | Dash, Tableau | Rapid prototyping, Python-native, free, easy to deploy |
+| Cloud Strategy | Multi-cloud (AWS/Azure/GCP) | Single cloud | Penske may have existing cloud preferences; flexibility matters |
+| LLM Strategy | Multi-provider abstraction | Single LLM | Swap GPT-4 ↔ Claude ↔ Bedrock without code changes |
+
+---
+
 ## Project Structure
 
 ```
